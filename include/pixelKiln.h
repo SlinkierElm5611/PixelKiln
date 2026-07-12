@@ -6,6 +6,7 @@
 #define PIXELKILN_PIXELKILN_H
 
 #include <memory>
+#include "config.h"
 
 class PixelKilnImpl;
 
@@ -15,6 +16,7 @@ private:
     std::unique_ptr<PixelKilnImpl> m_impl;
 public:
     PixelKiln();
+    PixelKiln(Config config);
     ~PixelKiln();
 };
 
