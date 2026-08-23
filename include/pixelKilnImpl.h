@@ -12,7 +12,12 @@ class PixelKilnImpl
 private:
     Config m_config;
     vk::Instance m_instance;
+    vk::PhysicalDevice m_physicalDevice;
+    vk::PhysicalDeviceProperties m_physicalDeviceProperties;
+    vk::Device m_device;
     void createInstance();
+    void selectPhysicalDevice();
+    void createDevice();
 public:
     PixelKilnImpl(Config config);
     ~PixelKilnImpl();

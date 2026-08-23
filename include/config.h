@@ -6,9 +6,12 @@
 #define PIXELKILN_CONFIG_H
 #include <string>
 
+#include "gpuType.h"
+
 struct Config
 {
     std::string applicationName = "PixelKiln";
+    GpuType gpuType = DEDICATED;
 };
 
 #endif //PIXELKILN_CONFIG_H

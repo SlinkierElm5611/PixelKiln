@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/PixelKiln.iml" filepath="$PROJECT_DIR$/.idea/PixelKiln.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/PixelKiln.CMake.iml" filepath="$PROJECT_DIR$/.idea/PixelKiln.CMake.iml" />
     </modules>
   </component>
 </project>
