@@ -10,11 +10,10 @@ enum UniformBindingType {
     UNIFORM_BINDING_TYPE_BUFFER,
     UNIFORM_BINDING_TYPE_SAMPLER,
     UNIFORM_BINDING_TYPE_STORAGE_IMAGE,
+    UNIFORM_BINDING_TYPE_EMPTY,
     UNIFORM_BINDING_TYPE_COUNT
 };
 
-struct UniformBindings {
-    std::vector<UniformBindingType> uniformBindings;
-};
+typedef std::vector<UniformBindingType> UniformBindings;
 
 #endif //PIXELKILN_UNIFORMBINDINGS_H
