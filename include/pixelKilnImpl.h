@@ -7,9 +7,12 @@
 #include "config.h"
 #include <vulkan/vulkan.hpp>
 
+#include "computeProgram.h"
+
 class PixelKilnImpl
 {
 private:
+    uint64_t m_pipelineIDCounter;
     Config m_config;
     vk::Instance m_instance;
     vk::PhysicalDevice m_physicalDevice;
@@ -19,6 +22,7 @@ private:
     void selectPhysicalDevice();
     void createDevice();
 public:
+    uint64_t loadComputeProgram(const ComputeProgram &program);
     PixelKilnImpl(Config config);
     ~PixelKilnImpl();
 };

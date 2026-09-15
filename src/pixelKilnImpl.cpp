@@ -39,6 +39,10 @@ void PixelKilnImpl::createDevice() {
     m_device = m_physicalDevice.createDevice(deviceCreateInfo);
 }
 
+uint64_t PixelKilnImpl::loadComputeProgram(const ComputeProgram &program) {
+    // TODO: implement compute pipeline creation and storage
+    return m_pipelineIDCounter++;
+}
 PixelKilnImpl::PixelKilnImpl(Config config)
 {
     m_config = config;

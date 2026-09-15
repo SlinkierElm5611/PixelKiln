@@ -5,6 +5,10 @@
 #include "pixelKiln.h"
 #include "pixelKilnImpl.h"
 
+uint64_t PixelKiln::loadComputeProgram(const ComputeProgram &program) {
+    return m_impl->loadComputeProgram(program);
+}
+
 PixelKiln::PixelKiln() : PixelKiln(Config())
 {
 }
