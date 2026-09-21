@@ -12,6 +12,7 @@ struct Config
 {
     std::string applicationName = "PixelKiln";
     GpuType gpuType = DEDICATED;
+    bool enableValidation = false; // enables the Khronos validation layer if installed, messages go to stderr
 };
 
 #endif //PIXELKILN_CONFIG_H

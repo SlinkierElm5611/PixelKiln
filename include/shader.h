@@ -4,10 +4,11 @@
 
 #ifndef PIXELKILN_SHADER_H
 #define PIXELKILN_SHADER_H
+#include <cstdint>
 
 struct Shader {
-    uint32_t* spirv;
-    uint32_t spirvSize;
+    const uint32_t* spirv;
+    uint32_t spirvSize; // in bytes
 };
 
 #endif //PIXELKILN_SHADER_H

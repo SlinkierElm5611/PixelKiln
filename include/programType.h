@@ -1,0 +1,14 @@
+//
+// Created by Stefan Balta on 2026-09-21.
+//
+
+#ifndef PIXELKILN_PROGRAMTYPE_H
+#define PIXELKILN_PROGRAMTYPE_H
+
+enum ProgramType {
+    PROGRAM_TYPE_COMPUTE,
+    PROGRAM_TYPE_RASTER_DRAW,
+    PROGRAM_TYPE_COUNT
+};
+
+#endif //PIXELKILN_PROGRAMTYPE_H

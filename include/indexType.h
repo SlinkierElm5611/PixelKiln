@@ -1,0 +1,15 @@
+//
+// Created by Stefan Balta on 2026-09-21.
+//
+
+#ifndef PIXELKILN_INDEXTYPE_H
+#define PIXELKILN_INDEXTYPE_H
+
+enum IndexType {
+    INDEX_TYPE_NONE,
+    INDEX_TYPE_UINT16,
+    INDEX_TYPE_UINT32,
+    INDEX_TYPE_COUNT
+};
+
+#endif //PIXELKILN_INDEXTYPE_H

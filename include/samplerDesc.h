@@ -1,0 +1,26 @@
+//
+// Created by Stefan Balta on 2026-09-21.
+//
+
+#ifndef PIXELKILN_SAMPLERDESC_H
+#define PIXELKILN_SAMPLERDESC_H
+
+enum SamplerFilter {
+    SAMPLER_FILTER_NEAREST,
+    SAMPLER_FILTER_LINEAR,
+    SAMPLER_FILTER_COUNT
+};
+
+enum SamplerAddressMode {
+    SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    SAMPLER_ADDRESS_MODE_REPEAT,
+    SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT,
+    SAMPLER_ADDRESS_MODE_COUNT
+};
+
+struct SamplerDesc {
+    SamplerFilter filter = SAMPLER_FILTER_LINEAR;
+    SamplerAddressMode addressMode = SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+};
+
+#endif //PIXELKILN_SAMPLERDESC_H

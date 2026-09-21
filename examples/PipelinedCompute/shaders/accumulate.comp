@@ -1,0 +1,22 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform Params {
+    uint iteration;
+    uint count;
+} params;
+layout(set = 0, binding = 1) readonly buffer Batch {
+    uint values[];
+} batch;
+layout(set = 0, binding = 2) buffer Results {
+    uint values[];
+} results;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i < params.count) {
+        results.values[params.iteration * params.count + i] = batch.values[i] * 3u + params.iteration;
+    }
+}
