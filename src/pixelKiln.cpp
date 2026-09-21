@@ -65,6 +65,30 @@ void PixelKiln::waitIdle() {
     m_impl->waitIdle();
 }
 
+uint64_t PixelKiln::createSwapchain(const NativeWindow &window, const SwapchainDesc &desc) {
+    return m_impl->createSwapchain(window, desc);
+}
+
+void PixelKiln::destroySwapchain(uint64_t swapchain) {
+    m_impl->destroySwapchain(swapchain);
+}
+
+void PixelKiln::resizeSwapchain(uint64_t swapchain, uint32_t width, uint32_t height) {
+    m_impl->resizeSwapchain(swapchain, width, height);
+}
+
+SwapchainInfo PixelKiln::getSwapchainInfo(uint64_t swapchain) {
+    return m_impl->getSwapchainInfo(swapchain);
+}
+
+uint64_t PixelKiln::acquireSwapchainImage(uint64_t swapchain) {
+    return m_impl->acquireSwapchainImage(swapchain);
+}
+
+void PixelKiln::present(uint64_t swapchain) {
+    m_impl->present(swapchain);
+}
+
 PixelKiln::PixelKiln() : PixelKiln(Config())
 {
 }

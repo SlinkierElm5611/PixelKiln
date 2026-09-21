@@ -11,8 +11,10 @@
 #include "computeProgram.h"
 #include "config.h"
 #include "imageDesc.h"
+#include "nativeWindow.h"
 #include "programCall.h"
 #include "rasterDrawProgram.h"
+#include "swapchainDesc.h"
 
 class PixelKilnImpl;
 
@@ -48,6 +50,16 @@ public:
     bool isComplete(uint64_t ticket);
     void wait(uint64_t ticket);
     void waitIdle();
+
+    // Presents into an application-owned window. Each frame: acquireSwapchainImage, any number of calls rendering to
+    // the returned image, present. The image handle is only valid until present().
+    uint64_t createSwapchain(const NativeWindow &window, const SwapchainDesc &desc);
+    void destroySwapchain(uint64_t swapchain); // before the window is destroyed
+    void resizeSwapchain(uint64_t swapchain, uint32_t width, uint32_t height); // applied at the next acquire
+    SwapchainInfo getSwapchainInfo(uint64_t swapchain);
+    // Returns 0 when there is nothing to render to (e.g. the window is minimized).
+    uint64_t acquireSwapchainImage(uint64_t swapchain);
+    void present(uint64_t swapchain);
 
     PixelKiln();
     PixelKiln(Config config);

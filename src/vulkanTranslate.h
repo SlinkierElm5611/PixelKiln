@@ -26,6 +26,7 @@ inline vk::Format toVkFormat(ImageFormat format)
         case IMAGE_FORMAT_RGBA8_UNORM: return vk::Format::eR8G8B8A8Unorm;
         case IMAGE_FORMAT_RGBA8_SRGB: return vk::Format::eR8G8B8A8Srgb;
         case IMAGE_FORMAT_BGRA8_UNORM: return vk::Format::eB8G8R8A8Unorm;
+        case IMAGE_FORMAT_BGRA8_SRGB: return vk::Format::eB8G8R8A8Srgb;
         case IMAGE_FORMAT_R8_UNORM: return vk::Format::eR8Unorm;
         case IMAGE_FORMAT_R32_FLOAT: return vk::Format::eR32Sfloat;
         case IMAGE_FORMAT_RG32_FLOAT: return vk::Format::eR32G32Sfloat;
@@ -35,6 +36,18 @@ inline vk::Format toVkFormat(ImageFormat format)
         case IMAGE_FORMAT_D16_UNORM: return vk::Format::eD16Unorm;
         case IMAGE_FORMAT_D32_FLOAT: return vk::Format::eD32Sfloat;
         default: throw std::invalid_argument("PixelKiln: invalid ImageFormat");
+    }
+}
+
+// The swapchain formats PixelKiln can hand out, IMAGE_FORMAT_UNDEFINED for anything else.
+inline ImageFormat fromVkSwapchainFormat(vk::Format format)
+{
+    switch (format) {
+        case vk::Format::eB8G8R8A8Unorm: return IMAGE_FORMAT_BGRA8_UNORM;
+        case vk::Format::eB8G8R8A8Srgb: return IMAGE_FORMAT_BGRA8_SRGB;
+        case vk::Format::eR8G8B8A8Unorm: return IMAGE_FORMAT_RGBA8_UNORM;
+        case vk::Format::eR8G8B8A8Srgb: return IMAGE_FORMAT_RGBA8_SRGB;
+        default: return IMAGE_FORMAT_UNDEFINED;
     }
 }
 
@@ -51,6 +64,7 @@ inline uint32_t texelSize(ImageFormat format)
         case IMAGE_FORMAT_RGBA8_UNORM:
         case IMAGE_FORMAT_RGBA8_SRGB:
         case IMAGE_FORMAT_BGRA8_UNORM:
+        case IMAGE_FORMAT_BGRA8_SRGB:
         case IMAGE_FORMAT_R32_FLOAT:
         case IMAGE_FORMAT_R32_UINT:
         case IMAGE_FORMAT_D32_FLOAT: return 4;

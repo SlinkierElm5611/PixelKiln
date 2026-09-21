@@ -51,6 +51,59 @@ programs can be destroyed while the GPU still uses them, destruction is deferred
 
 See `examples/` for compute, raster draw and pipelined upload examples.
 
+## Windowing
+
+PixelKiln presents into windows the application owns (GLFW, SDL, Qt, native). It only takes the window's native handles
+as a `NativeWindow`; the application keeps the event loop. Swapchain images are regular image handles, valid between
+`acquireSwapchainImage` and `present`:
+
+```cpp
+uint64_t swapchain = kiln.createSwapchain(nativeWindow, {framebufferWidth, framebufferHeight});
+program.colorFormats = {kiln.getSwapchainInfo(swapchain).format};
+// every frame:
+if (resized) kiln.resizeSwapchain(swapchain, framebufferWidth, framebufferHeight);
+uint64_t image = kiln.acquireSwapchainImage(swapchain);   // 0 while minimized
+call.colorTargets = {{image, true, {0.0f, 0.0f, 0.0f, 1.0f}}};
+kiln.call(call);
+kiln.present(swapchain);
+// before destroying the window:
+kiln.destroySwapchain(swapchain);
+```
+
+With GLFW (create the window with `GLFW_CLIENT_API` set to `GLFW_NO_API`), the native handles are:
+
+```cpp
+#if defined(_WIN32)
+#define GLFW_EXPOSE_NATIVE_WIN32
+#elif defined(__APPLE__)
+#define GLFW_EXPOSE_NATIVE_COCOA
+#else
+#define GLFW_EXPOSE_NATIVE_X11
+#endif
+#include <GLFW/glfw3native.h>
+
+NativeWindow toNativeWindow(GLFWwindow* window)
+{
+#if defined(_WIN32)
+    return {NATIVE_WINDOW_WIN32, GetModuleHandleW(nullptr), glfwGetWin32Window(window)};
+#elif defined(__APPLE__)
+    return {NATIVE_WINDOW_COCOA_VIEW, nullptr, glfwGetCocoaView(window)};
+#else
+    return {NATIVE_WINDOW_XLIB, glfwGetX11Display(), (void*)(uintptr_t)glfwGetX11Window(window)};
+#endif
+}
+```
+
+On macOS, `createSwapchain` with `NATIVE_WINDOW_COCOA_VIEW` must be called on the main thread (it attaches a
+`CAMetalLayer` to the view); pass your own layer with `NATIVE_WINDOW_METAL_LAYER` to avoid that. On Linux, X11 (Xlib,
+xcb) and Wayland support is compiled in when their development headers are found.
+
+`examples/Window` is a complete GLFW example. GLFW is a git submodule used only by that example and the window tests:
+
+```sh
+git submodule update --init
+```
+
 ## Tests
 
 ```sh
@@ -67,6 +120,8 @@ Tests run under the Khronos validation layer from the Vulkan SDK and fail on any
   to cover several drivers on one machine.
 - `PIXELKILN_TEST_TRANSFER_ONLY_DRIVER_FILE`: an ICD manifest for a device with 4 queue families of 1 queue each
   (e.g. MoltenVK). Runs every test with the profiles layer reporting family 1 as transfer-only, like NVIDIA/AMD GPUs.
+- `PIXELKILN_TEST_WINDOW=ON`: also builds and registers the window/presentation tests (label `window`). They open real
+  windows, so they need a display and the GLFW submodule.
 
 For example, on macOS with the Vulkan SDK:
 

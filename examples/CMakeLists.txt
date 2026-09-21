@@ -1,3 +1,6 @@
 add_subdirectory(HeadlessRender)
 add_subdirectory(ComputeBasic)
 add_subdirectory(PipelinedCompute)
+if(PIXELKILN_GLFW)
+    add_subdirectory(Window)
+endif()

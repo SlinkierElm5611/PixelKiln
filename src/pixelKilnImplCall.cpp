@@ -28,6 +28,7 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
     std::unordered_map<uint64_t, vk::ImageLayout> usedImages; // image handle -> layout the call needs it in
     std::unordered_set<uint64_t> clearedImages; // targets that are cleared, their old contents can be dropped
     auto useImage = [&](uint64_t handle, vk::ImageLayout layout) {
+        checkSwapchainImage(m_images.at(handle));
         auto [it, inserted] = usedImages.emplace(handle, layout);
         if (!inserted && it->second != layout) {
             throw std::invalid_argument("PixelKiln: an image can't be used in two different ways by the same call");
@@ -300,7 +301,24 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
     for (const auto& [handle, layout] : usedImages) {
         waitTransfer = std::max(waitTransfer, m_images.at(handle).lastTransferUse);
     }
-    uint64_t ticket = submitCommands(QUEUE_ALL, commandBuffer, waitTransfer);
+    // A swapchain image rendered to for the first time since it was acquired: wait for the acquire.
+    std::vector<vk::Semaphore> acquireWaits;
+    std::vector<Swapchain*> acquiredSwapchains;
+    for (const auto& [handle, layout] : usedImages) {
+        uint64_t swapchainHandle = m_images.at(handle).swapchain;
+        if (swapchainHandle) {
+            Swapchain &swapchain = m_swapchains.at(swapchainHandle);
+            if (swapchain.pendingAcquire >= 0) {
+                acquireWaits.push_back(swapchain.acquireSemaphores[static_cast<size_t>(swapchain.pendingAcquire)].semaphore);
+                acquiredSwapchains.push_back(&swapchain);
+            }
+        }
+    }
+    uint64_t ticket = submitCommands(QUEUE_ALL, commandBuffer, waitTransfer, acquireWaits);
+    for (Swapchain* swapchain : acquiredSwapchains) {
+        swapchain->acquireSemaphores[static_cast<size_t>(swapchain->pendingAcquire)].allValue = ticket;
+        swapchain->pendingAcquire = -1;
+    }
 
     for (Buffer* buffer : usedBuffers) {
         buffer->lastAllUse = ticket;

@@ -15,8 +15,10 @@
 #include "computeProgram.h"
 #include "config.h"
 #include "imageDesc.h"
+#include "nativeWindow.h"
 #include "programCall.h"
 #include "rasterDrawProgram.h"
+#include "swapchainDesc.h"
 
 // Two timeline semaphores drive everything:
 //  - the transfer timeline is signalled by every submission to the transfer queue (uploads, uniform uploads, downloads)
@@ -43,6 +45,7 @@ private:
         vk::ImageLayout layout = vk::ImageLayout::eUndefined; // layout after all recorded work
         uint64_t lastAllUse = 0;
         uint64_t lastTransferUse = 0;
+        uint64_t swapchain = 0; // owning swapchain for swapchain images (image and memory not owned), 0 otherwise
     };
     struct Program {
         ProgramType type = PROGRAM_TYPE_COMPUTE;
@@ -73,6 +76,25 @@ private:
         uint64_t offset;
         uint64_t size;
         uint64_t allValue;
+    };
+    struct AcquireSemaphore {
+        vk::Semaphore semaphore;
+        uint64_t allValue = 0; // all value of the submission that waited on it, reusable once completed
+    };
+    struct Swapchain {
+        vk::SurfaceKHR surface;
+        vk::SwapchainKHR swapchain;
+        SwapchainDesc desc;
+        SwapchainInfo info;
+        vk::SurfaceFormatKHR surfaceFormat;
+        vk::PresentModeKHR presentMode = vk::PresentModeKHR::eFifo;
+        vk::ImageUsageFlags usage;
+        std::vector<uint64_t> images; // PixelKiln image handles, one per swapchain image
+        std::vector<vk::Semaphore> renderedSemaphores; // one per image index, waited by vkQueuePresentKHR
+        std::vector<AcquireSemaphore> acquireSemaphores;
+        int64_t acquiredIndex = -1; // image index between acquire and present
+        int64_t pendingAcquire = -1; // acquireSemaphores index signalled by acquire and not yet waited on
+        bool needsRecreate = true;
     };
     struct PendingDestroy {
         uint64_t allValue;
@@ -122,6 +144,9 @@ private:
     std::unordered_map<uint64_t, Program> m_programs;
     std::unordered_map<uint64_t, Buffer> m_buffers;
     std::unordered_map<uint64_t, Image> m_images;
+    std::unordered_map<uint64_t, Swapchain> m_swapchains;
+    bool m_surfaceSupport = false; // VK_KHR_surface enabled on the instance
+    bool m_swapchainSupport = false; // VK_KHR_swapchain enabled on the device
     std::vector<PendingDestroy> m_pendingDestroys;
 
     // pixelKilnImpl.cpp
@@ -134,8 +159,10 @@ private:
     void waitValue(QueueKind queue, uint64_t value);
     vk::CommandBuffer beginCommands(QueueKind queue);
     // Ends and submits the command buffer. It waits on the other queue's timeline for waitValue (0 = no wait) and
-    // signals and returns the next value of its own timeline.
-    uint64_t submitCommands(QueueKind queue, vk::CommandBuffer commandBuffer, uint64_t waitValue);
+    // signals and returns the next value of its own timeline. Binary semaphores (swapchain acquire / present) can be
+    // waited and signalled in the same submission, all queue only.
+    uint64_t submitCommands(QueueKind queue, vk::CommandBuffer commandBuffer, uint64_t waitValue,
+                            const std::vector<vk::Semaphore> &binaryWaits = {}, vk::Semaphore binarySignal = {});
     void deferDestroy(uint64_t allValue, uint64_t transferValue, std::function<void()> destroy);
     void collectGarbage();
 
@@ -159,6 +186,15 @@ private:
     vk::Sampler getSampler(const SamplerDesc &desc);
     vk::DescriptorSet allocateDescriptorSet(vk::DescriptorSetLayout layout);
     DescriptorPool acquireDescriptorPool();
+
+    // pixelKilnImplSwapchain.cpp
+    Swapchain &getSwapchain(uint64_t swapchain);
+    // Checks that a swapchain image may be used right now (acquired and not yet presented).
+    void checkSwapchainImage(const Image &image);
+    // Returns false when the window currently has no area, the swapchain is then left for a later acquire.
+    bool recreateSwapchain(uint64_t handle, Swapchain &swapchain);
+    void destroySwapchainImages(Swapchain &swapchain);
+    void teardownSwapchain(Swapchain &swapchain);
 
     // pixelKilnImplPrograms.cpp
     Program &getProgram(uint64_t program);
@@ -184,6 +220,13 @@ public:
     bool isComplete(uint64_t ticket);
     void wait(uint64_t ticket);
     void waitIdle();
+
+    uint64_t createSwapchain(const NativeWindow &window, const SwapchainDesc &desc);
+    void destroySwapchain(uint64_t swapchain);
+    void resizeSwapchain(uint64_t swapchain, uint32_t width, uint32_t height);
+    SwapchainInfo getSwapchainInfo(uint64_t swapchain);
+    uint64_t acquireSwapchainImage(uint64_t swapchain);
+    void present(uint64_t swapchain);
 
     PixelKilnImpl(Config config);
     ~PixelKilnImpl();

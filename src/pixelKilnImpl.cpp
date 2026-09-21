@@ -3,6 +3,7 @@
 //
 
 #include "pixelKilnImpl.h"
+#include "surface.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -38,6 +39,15 @@ void PixelKilnImpl::createInstance()
     if (hasExtension(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
         extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
         createInfo.flags |= vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR;
+    }
+    // Window surfaces, when the loader supports them. Headless machines simply don't get swapchains.
+    if (hasExtension(VK_KHR_SURFACE_EXTENSION_NAME)) {
+        for (const char* extension : surfaceInstanceExtensions()) {
+            if (hasExtension(extension)) {
+                extensions.push_back(extension);
+            }
+        }
+        m_surfaceSupport = true;
     }
     bool debugUtils = false;
     if (m_config.enableValidation) {
@@ -189,6 +199,10 @@ void PixelKilnImpl::createDevice() {
         if (std::strcmp(extension.extensionName.data(), "VK_KHR_portability_subset") == 0) {
             extensions.push_back("VK_KHR_portability_subset");
         }
+        if (m_surfaceSupport && std::strcmp(extension.extensionName.data(), VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0) {
+            extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+            m_swapchainSupport = true;
+        }
     }
 
     vk::PhysicalDeviceVulkan13Features features13{};
@@ -270,7 +284,8 @@ vk::CommandBuffer PixelKilnImpl::beginCommands(QueueKind queue) {
     return free->commandBuffer;
 }
 
-uint64_t PixelKilnImpl::submitCommands(QueueKind queue, vk::CommandBuffer commandBuffer, uint64_t waitValue) {
+uint64_t PixelKilnImpl::submitCommands(QueueKind queue, vk::CommandBuffer commandBuffer, uint64_t waitValue,
+                                      const std::vector<vk::Semaphore> &binaryWaits, vk::Semaphore binarySignal) {
     commandBuffer.end();
     const bool transfer = queue == QUEUE_TRANSFER;
     // The transfer queue may be a transfer-only family, so its semaphore stages stay within transfer. This also keeps
@@ -279,24 +294,40 @@ uint64_t PixelKilnImpl::submitCommands(QueueKind queue, vk::CommandBuffer comman
                                                     : vk::PipelineStageFlagBits2::eAllCommands;
     uint64_t &value = transfer ? m_transferValue : m_allValue;
 
-    vk::SemaphoreSubmitInfo waitInfo{};
-    waitInfo.semaphore = transfer ? m_allTimeline : m_transferTimeline;
-    waitInfo.value = waitValue;
-    waitInfo.stageMask = stages;
-    vk::SemaphoreSubmitInfo signalInfo{};
-    signalInfo.semaphore = transfer ? m_transferTimeline : m_allTimeline;
-    signalInfo.value = value + 1;
-    signalInfo.stageMask = stages;
+    std::vector<vk::SemaphoreSubmitInfo> waitInfos;
+    if (waitValue > 0) {
+        vk::SemaphoreSubmitInfo waitInfo{};
+        waitInfo.semaphore = transfer ? m_allTimeline : m_transferTimeline;
+        waitInfo.value = waitValue;
+        waitInfo.stageMask = stages;
+        waitInfos.push_back(waitInfo);
+    }
+    for (vk::Semaphore semaphore : binaryWaits) {
+        vk::SemaphoreSubmitInfo waitInfo{};
+        waitInfo.semaphore = semaphore;
+        waitInfo.stageMask = stages;
+        waitInfos.push_back(waitInfo);
+    }
+    std::vector<vk::SemaphoreSubmitInfo> signalInfos(1);
+    signalInfos[0].semaphore = transfer ? m_transferTimeline : m_allTimeline;
+    signalInfos[0].value = value + 1;
+    signalInfos[0].stageMask = stages;
+    if (binarySignal) {
+        vk::SemaphoreSubmitInfo signalInfo{};
+        signalInfo.semaphore = binarySignal;
+        signalInfo.stageMask = stages;
+        signalInfos.push_back(signalInfo);
+    }
     vk::CommandBufferSubmitInfo commandBufferInfo{};
     commandBufferInfo.commandBuffer = commandBuffer;
 
     vk::SubmitInfo2 submitInfo{};
-    submitInfo.waitSemaphoreInfoCount = waitValue > 0 ? 1 : 0;
-    submitInfo.pWaitSemaphoreInfos = &waitInfo;
+    submitInfo.waitSemaphoreInfoCount = static_cast<uint32_t>(waitInfos.size());
+    submitInfo.pWaitSemaphoreInfos = waitInfos.data();
     submitInfo.commandBufferInfoCount = 1;
     submitInfo.pCommandBufferInfos = &commandBufferInfo;
-    submitInfo.signalSemaphoreInfoCount = 1;
-    submitInfo.pSignalSemaphoreInfos = &signalInfo;
+    submitInfo.signalSemaphoreInfoCount = static_cast<uint32_t>(signalInfos.size());
+    submitInfo.pSignalSemaphoreInfos = signalInfos.data();
     (transfer ? m_transferQueue : m_allQueue).submit2(submitInfo);
     value++;
 
@@ -350,6 +381,10 @@ void PixelKilnImpl::waitIdle() {
 
 void PixelKilnImpl::destroyAll() {
     if (m_device) {
+        for (auto& [handle, swapchain] : m_swapchains) {
+            teardownSwapchain(swapchain);
+        }
+        m_swapchains.clear();
         m_device.waitIdle();
         for (auto& pending : m_pendingDestroys) {
             pending.destroy();

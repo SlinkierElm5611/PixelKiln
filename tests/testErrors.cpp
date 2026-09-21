@@ -216,3 +216,30 @@ TEST(errors_raster_calls)
     std::vector<uint8_t> pixels = downloadPixels(kiln, color, 16, 16);
     CHECK_EQ(pixelAt(pixels, 16, 8, 8), packRgba(255, 255, 255, 255));
 }
+
+// Argument checks that don't need a window system (runs on headless machines too).
+TEST(errors_swapchain_arguments)
+{
+    PixelKiln kiln;
+    void* notAWindow = reinterpret_cast<void*>(uintptr_t(0x1)); // never dereferenced: the checks come first
+    CHECK_THROWS_INVALID(kiln.createSwapchain({NATIVE_WINDOW_TYPE_COUNT, nullptr, notAWindow}, {}));
+    CHECK_THROWS_INVALID(kiln.createSwapchain({static_cast<NativeWindowType>(77), nullptr, notAWindow}, {}));
+    CHECK_THROWS_INVALID(kiln.createSwapchain({NATIVE_WINDOW_COCOA_VIEW, nullptr, nullptr}, {}));
+    SwapchainDesc desc{};
+    desc.presentMode = static_cast<PresentMode>(42);
+    CHECK_THROWS_INVALID(kiln.createSwapchain({NATIVE_WINDOW_COCOA_VIEW, nullptr, notAWindow}, desc));
+    desc = {};
+    desc.usage = 0;
+    CHECK_THROWS_INVALID(kiln.createSwapchain({NATIVE_WINDOW_COCOA_VIEW, nullptr, notAWindow}, desc));
+    desc.usage = IMAGE_USAGE_SAMPLED;
+    CHECK_THROWS_INVALID(kiln.createSwapchain({NATIVE_WINDOW_COCOA_VIEW, nullptr, notAWindow}, desc));
+    desc = {};
+    desc.format = static_cast<ImageFormat>(99);
+    CHECK_THROWS_INVALID(kiln.createSwapchain({NATIVE_WINDOW_COCOA_VIEW, nullptr, notAWindow}, desc));
+
+    CHECK_THROWS_INVALID(kiln.destroySwapchain(999));
+    CHECK_THROWS_INVALID(kiln.resizeSwapchain(999, 10, 10));
+    CHECK_THROWS_INVALID(kiln.getSwapchainInfo(999));
+    CHECK_THROWS_INVALID(kiln.acquireSwapchainImage(999));
+    CHECK_THROWS_INVALID(kiln.present(999));
+}

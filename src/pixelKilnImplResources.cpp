@@ -360,6 +360,9 @@ uint64_t PixelKilnImpl::createImage(const ImageDesc &desc) {
 void PixelKilnImpl::destroyImage(uint64_t image) {
     collectGarbage();
     Image destroyed = getImage(image);
+    if (destroyed.swapchain) {
+        throw std::invalid_argument("PixelKiln: swapchain images belong to their swapchain and can't be destroyed");
+    }
     m_images.erase(image);
     vk::Device device = m_device;
     deferDestroy(destroyed.lastAllUse, destroyed.lastTransferUse, [device, destroyed]() {
@@ -376,6 +379,9 @@ void PixelKilnImpl::uploadImage(uint64_t image, const void* data, uint64_t size)
     Image &target = getImage(image);
     if (isDepthFormat(target.desc.format)) {
         throw std::invalid_argument("PixelKiln: depth images can't be uploaded");
+    }
+    if (target.swapchain) {
+        throw std::invalid_argument("PixelKiln: swapchain images can't be uploaded to");
     }
     const uint64_t expectedSize = uint64_t(target.desc.width) * target.desc.height * texelSize(target.desc.format);
     if (!data || size != expectedSize) {
@@ -412,6 +418,16 @@ void PixelKilnImpl::downloadImage(uint64_t image, void* data, uint64_t size) {
     Image &source = getImage(image);
     if (isDepthFormat(source.desc.format)) {
         throw std::invalid_argument("PixelKiln: depth images can't be downloaded");
+    }
+    if (source.swapchain) {
+        checkSwapchainImage(source);
+        const Swapchain &swapchain = m_swapchains.at(source.swapchain);
+        if (swapchain.pendingAcquire >= 0) {
+            throw std::invalid_argument("PixelKiln: render to a swapchain image before downloading it");
+        }
+        if (!(swapchain.usage & vk::ImageUsageFlagBits::eTransferSrc)) {
+            throw std::invalid_argument("PixelKiln: this window's swapchain images can't be downloaded");
+        }
     }
     const uint64_t expectedSize = uint64_t(source.desc.width) * source.desc.height * texelSize(source.desc.format);
     if (!data || size != expectedSize) {
