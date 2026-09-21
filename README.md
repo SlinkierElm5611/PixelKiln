@@ -50,3 +50,28 @@ Uploads return once the data is staged; downloads block until every earlier use 
 programs can be destroyed while the GPU still uses them, destruction is deferred. PixelKiln is not thread-safe.
 
 See `examples/` for compute, raster draw and pipelined upload examples.
+
+## Tests
+
+```sh
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Every `TEST(name)` in `tests/test*.cpp` and every example is its own ctest test (`ctest -L unit`, `ctest -L example`).
+Tests run under the Khronos validation layer from the Vulkan SDK and fail on any validation message
+(`-DPIXELKILN_TEST_VALIDATION=OFF` to disable). Optional cache variables add variants of every test:
+
+- `PIXELKILN_TEST_DRIVER_FILES`: a list of Vulkan ICD manifests, each run as its own variant (via `VK_DRIVER_FILES`),
+  to cover several drivers on one machine.
+- `PIXELKILN_TEST_TRANSFER_ONLY_DRIVER_FILE`: an ICD manifest for a device with 4 queue families of 1 queue each
+  (e.g. MoltenVK). Runs every test with the profiles layer reporting family 1 as transfer-only, like NVIDIA/AMD GPUs.
+
+For example, on macOS with the Vulkan SDK:
+
+```sh
+cmake -S . -B build \
+  -DPIXELKILN_TEST_DRIVER_FILES="/usr/local/share/vulkan/icd.d/MoltenVK_icd.json;/usr/local/share/vulkan/icd.d/libkosmickrisp_icd.json" \
+  -DPIXELKILN_TEST_TRANSFER_ONLY_DRIVER_FILE=/usr/local/share/vulkan/icd.d/MoltenVK_icd.json
+```

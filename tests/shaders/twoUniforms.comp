@@ -1,0 +1,22 @@
+#version 450
+
+// Two uniform buffers in one call: output = (a, b.x, b.y, b.z)
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) uniform A {
+    uint a;
+} first;
+layout(set = 0, binding = 1) uniform B {
+    uvec3 b;
+} second;
+layout(set = 0, binding = 2) writeonly buffer Output {
+    uint values[];
+} outputData;
+
+void main()
+{
+    outputData.values[0] = first.a;
+    outputData.values[1] = second.b.x;
+    outputData.values[2] = second.b.y;
+    outputData.values[3] = second.b.z;
+}

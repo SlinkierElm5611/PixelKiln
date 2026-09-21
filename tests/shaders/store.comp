@@ -1,0 +1,17 @@
+#version 450
+
+// output[index] = value
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) uniform Params {
+    uint index;
+    uint value;
+} params;
+layout(set = 0, binding = 1) buffer Output {
+    uint values[];
+} outputData;
+
+void main()
+{
+    outputData.values[params.index] = params.value;
+}

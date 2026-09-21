@@ -16,4 +16,12 @@ target_include_directories(PixelKiln PUBLIC include PRIVATE src)
 
 target_link_libraries(PixelKiln PRIVATE Vulkan::Vulkan)
 
+include(cmake/pixelKilnShaders.cmake)
+
 add_subdirectory(examples)
+
+option(PIXELKILN_BUILD_TESTS "Build the PixelKiln ctest suite" ${PROJECT_IS_TOP_LEVEL})
+if(PIXELKILN_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
