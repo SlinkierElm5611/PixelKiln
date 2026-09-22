@@ -30,7 +30,7 @@ static const uint32_t blitFragSpirv[] =
 #include "blit.frag.h"
 ;
 
-static const uint32_t SIZE = 512;
+static const uint32_t GRID_SIZE = 512;
 static const int STEPS_PER_FRAME = 16;
 
 struct Preset {
@@ -56,19 +56,19 @@ struct StepParams {
 // All feed chemical, with a few random square seeds of the second one.
 static std::vector<float> seedCells()
 {
-    std::vector<float> cells(size_t(SIZE) * SIZE * 2);
+    std::vector<float> cells(size_t(GRID_SIZE) * GRID_SIZE * 2);
     for (size_t i = 0; i < cells.size(); i += 2) {
         cells[i] = 1.0f;
         cells[i + 1] = 0.0f;
     }
     std::mt19937 random(42);
-    std::uniform_int_distribution<uint32_t> position(0, SIZE - 12);
+    std::uniform_int_distribution<uint32_t> position(0, GRID_SIZE - 12);
     for (int seed = 0; seed < 40; seed++) {
         uint32_t seedX = position(random), seedY = position(random);
         for (uint32_t y = seedY; y < seedY + 10; y++) {
             for (uint32_t x = seedX; x < seedX + 10; x++) {
-                cells[(size_t(y) * SIZE + x) * 2 + 0] = 0.5f;
-                cells[(size_t(y) * SIZE + x) * 2 + 1] = 0.5f;
+                cells[(size_t(y) * GRID_SIZE + x) * 2 + 0] = 0.5f;
+                cells[(size_t(y) * GRID_SIZE + x) * 2 + 1] = 0.5f;
             }
         }
     }
@@ -80,11 +80,11 @@ int main(int argc, char** argv)
     PixelKiln kiln;
     ExampleWindow window(kiln, "PixelKiln - Reaction Diffusion", 900, 900, argc, argv);
 
-    const uint64_t cellBytes = uint64_t(SIZE) * SIZE * 2 * sizeof(float);
+    const uint64_t cellBytes = uint64_t(GRID_SIZE) * GRID_SIZE * 2 * sizeof(float);
     uint64_t cells[2] = {kiln.createBuffer(cellBytes), kiln.createBuffer(cellBytes)};
     std::vector<float> seed = seedCells();
     kiln.uploadBuffer(cells[0], seed.data(), cellBytes);
-    uint64_t colors = kiln.createImage({SIZE, SIZE, IMAGE_FORMAT_RGBA8_UNORM, IMAGE_USAGE_STORAGE | IMAGE_USAGE_SAMPLED});
+    uint64_t colors = kiln.createImage({GRID_SIZE, GRID_SIZE, IMAGE_FORMAT_RGBA8_UNORM, IMAGE_USAGE_STORAGE | IMAGE_USAGE_SAMPLED});
 
     uint64_t step = kiln.loadComputeProgram({{stepSpirv, sizeof(stepSpirv)},
                                              {UNIFORM_BINDING_TYPE_STORAGE_BUFFER, UNIFORM_BINDING_TYPE_STORAGE_BUFFER,
@@ -124,14 +124,14 @@ int main(int argc, char** argv)
         letterbox(1.0f, window.aspect(), scale);
 
         // The brush in cell coordinates, through the letterboxing.
-        StepParams params{SIZE, SIZE, preset->feed, preset->kill, 0.0f, 0.0f, 6.0f, 0};
+        StepParams params{GRID_SIZE, GRID_SIZE, preset->feed, preset->kill, 0.0f, 0.0f, 6.0f, 0};
         if (window.mouseDown()) {
             float mouseX, mouseY;
             window.mouse(mouseX, mouseY);
             float u = (mouseX / float(window.width()) - 0.5f) / scale[0] + 0.5f;
             float v = (mouseY / float(window.height()) - 0.5f) / scale[1] + 0.5f;
-            params.brushX = u * float(SIZE);
-            params.brushY = v * float(SIZE);
+            params.brushX = u * float(GRID_SIZE);
+            params.brushY = v * float(GRID_SIZE);
             params.brushActive = 1;
         }
 
@@ -141,19 +141,19 @@ int main(int argc, char** argv)
             stepCall.program = step;
             stepCall.bindings = {{.resource = cells[current]}, {.resource = cells[1 - current]},
                                  {.data = &params, .size = sizeof(params)}};
-            stepCall.groupCountX = SIZE / 16;
-            stepCall.groupCountY = SIZE / 16;
+            stepCall.groupCountX = GRID_SIZE / 16;
+            stepCall.groupCountY = GRID_SIZE / 16;
             kiln.call(stepCall);
             current = 1 - current;
         }
 
-        const uint32_t size[2] = {SIZE, SIZE};
+        const uint32_t size[2] = {GRID_SIZE, GRID_SIZE};
         ProgramCall colorizeCall{};
         colorizeCall.type = PROGRAM_TYPE_COMPUTE;
         colorizeCall.program = colorize;
         colorizeCall.bindings = {{.resource = cells[current]}, {.resource = colors}, {.data = size, .size = sizeof(size)}};
-        colorizeCall.groupCountX = SIZE / 16;
-        colorizeCall.groupCountY = SIZE / 16;
+        colorizeCall.groupCountX = GRID_SIZE / 16;
+        colorizeCall.groupCountY = GRID_SIZE / 16;
         kiln.call(colorizeCall);
 
         ProgramCall blitCall{};
