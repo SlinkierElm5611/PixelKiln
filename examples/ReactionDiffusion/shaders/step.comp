@@ -1,0 +1,50 @@
+#version 450
+
+// One Gray-Scott reaction-diffusion step on a wrapping grid: u is the feed chemical, v the one that grows.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) readonly buffer Source {
+    vec2 cells[];
+} source;
+layout(set = 0, binding = 1) writeonly buffer Destination {
+    vec2 cells[];
+} destination;
+layout(set = 0, binding = 2) uniform Params {
+    uint width;
+    uint height;
+    float feed;
+    float kill;
+    vec2 brush;       // cell coordinates
+    float brushRadius;
+    uint brushActive;
+} params;
+
+vec2 cell(int x, int y)
+{
+    int width = int(params.width);
+    int height = int(params.height);
+    x = (x + width) % width;
+    y = (y + height) % height;
+    return source.cells[y * width + x];
+}
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(params.width) || p.y >= int(params.height)) {
+        return;
+    }
+    vec2 center = cell(p.x, p.y);
+    vec2 laplacian = -center
+        + 0.2 * (cell(p.x - 1, p.y) + cell(p.x + 1, p.y) + cell(p.x, p.y - 1) + cell(p.x, p.y + 1))
+        + 0.05 * (cell(p.x - 1, p.y - 1) + cell(p.x + 1, p.y - 1) + cell(p.x - 1, p.y + 1) + cell(p.x + 1, p.y + 1));
+    float u = center.x;
+    float v = center.y;
+    float reaction = u * v * v;
+    vec2 next = center + vec2(1.0 * laplacian.x - reaction + params.feed * (1.0 - u),
+                              0.5 * laplacian.y + reaction - (params.feed + params.kill) * v);
+    if (params.brushActive != 0u && distance(vec2(p), params.brush) < params.brushRadius) {
+        next = vec2(0.5, 0.5);
+    }
+    destination.cells[p.y * int(params.width) + p.x] = clamp(next, 0.0, 1.0);
+}

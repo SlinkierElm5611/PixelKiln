@@ -49,7 +49,7 @@ kiln.destroyBuffer(data);
 Uploads return once the data is staged; downloads block until every earlier use of the resource is done. Resources and
 programs can be destroyed while the GPU still uses them, destruction is deferred. PixelKiln is not thread-safe.
 
-See `examples/` for compute, raster draw and pipelined upload examples.
+See `examples/` for compute and windowed examples.
 
 ## Windowing
 
@@ -98,11 +98,23 @@ On macOS, `createSwapchain` with `NATIVE_WINDOW_COCOA_VIEW` must be called on th
 `CAMetalLayer` to the view); pass your own layer with `NATIVE_WINDOW_METAL_LAYER` to avoid that. On Linux, X11 (Xlib,
 xcb) and Wayland support is compiled in when their development headers are found.
 
-`examples/Window` is a complete GLFW example. GLFW is a git submodule used only by that example and the window tests:
+`examples/common/exampleWindow.h` shows the full GLFW setup used by the windowed examples. GLFW is a git submodule used
+only by those examples and the window tests:
 
 ```sh
 git submodule update --init
 ```
+
+## Examples
+
+| Example | What it shows |
+|---|---|
+| `ComputeBasic` | Compute on storage buffers and a storage image |
+| `Particles` | 262144 particles simulated in compute and drawn straight from the same buffer as points, with fading trails. Hold the left mouse button to pull them to the cursor |
+| `ReactionDiffusion` | Gray-Scott reaction-diffusion, 16 compute steps per frame ping-ponging two buffers, colored by a second compute pass. Paint with the mouse, `1`-`4` presets, `R` reset, `Space` pause |
+| `Mandelbrot` | Fractal explorer computed at window resolution. Drag to pan, scroll to zoom; left alone it dives into Seahorse Valley |
+
+The windowed examples accept `--frames N` (deterministic run of N frames) and `--screenshot file.bmp`.
 
 ## Tests
 

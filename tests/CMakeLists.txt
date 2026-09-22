@@ -87,6 +87,10 @@ function(pixelkiln_register_test name labels environment extraLayer)
         LABELS "${labels}"
         TIMEOUT 300
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    if("window" IN_LIST labels)
+        # One window test at a time: they share the screen and the window system.
+        set_tests_properties(${name} PROPERTIES RUN_SERIAL TRUE)
+    endif()
 endfunction()
 
 # Registers a test once for the default driver and once per configured driver variant.
@@ -114,7 +118,7 @@ foreach(test ${TEST_NAMES})
     pixelkiln_add_test(${test} unit $<TARGET_FILE:PixelKilnTests> ${test})
 endforeach()
 
-foreach(example HeadlessRender ComputeBasic PipelinedCompute)
+foreach(example ComputeBasic)
     pixelkiln_add_test(example.${example} example $<TARGET_FILE:${example}>)
 endforeach()
 
@@ -135,10 +139,10 @@ if(PIXELKILN_TEST_WINDOW)
     pixelkiln_scan_tests(WINDOW_TEST_NAMES ${CMAKE_CURRENT_SOURCE_DIR}/windowTests.cpp)
     foreach(test ${WINDOW_TEST_NAMES})
         pixelkiln_add_test(${test} window $<TARGET_FILE:PixelKilnWindowTests> ${test})
-        # One window test at a time: they share the screen and the window system.
-        set_tests_properties(${test} PROPERTIES RUN_SERIAL TRUE)
     endforeach()
-    pixelkiln_add_test(example.Window "example;window" $<TARGET_FILE:Window> --frames 120)
+    foreach(example Particles ReactionDiffusion Mandelbrot)
+        pixelkiln_add_test(example.${example} "example;window" $<TARGET_FILE:${example}> --frames 120)
+    endforeach()
     add_test(NAME window_test_names_in_sync COMMAND $<TARGET_FILE:PixelKilnWindowTests> --verify ${WINDOW_TEST_NAMES})
     set_tests_properties(window_test_names_in_sync PROPERTIES LABELS "meta")
 endif()
