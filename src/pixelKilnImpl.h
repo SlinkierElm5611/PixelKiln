@@ -172,6 +172,10 @@ private:
                                     vk::MemoryPropertyFlags preferred, bool* coherent = nullptr);
     void applySharingMode(vk::BufferCreateInfo &info, uint32_t* families);
     void applySharingMode(vk::ImageCreateInfo &info, uint32_t* families);
+    // Orders this transfer submission after earlier transfer submissions (they may run concurrently on the same
+    // queue), e.g. two uploads into the same buffer, or an upload after a download of it. Transfer stages only, so
+    // it is legal on transfer-only queue families.
+    void transferBarrier(vk::CommandBuffer commandBuffer);
     Buffer createDeviceBuffer(uint64_t size, vk::BufferUsageFlags usage);
     StagingBuffer createStagingBuffer(uint64_t size, bool readback);
     void destroyStagingBuffer(const StagingBuffer &staging);

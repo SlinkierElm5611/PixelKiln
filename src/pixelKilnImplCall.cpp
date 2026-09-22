@@ -147,6 +147,7 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
             }
         }
         vk::CommandBuffer transfer = beginCommands(QUEUE_TRANSFER);
+        transferBarrier(transfer);
         vk::BufferCopy region{uniformBase, uniformBase, uniformSize};
         transfer.copyBuffer(m_uniformStaging.buffer, m_uniformBuffer.buffer, region);
         // The region was last read by a call that has completed (m_uniformReuseValue or earlier); waiting on it

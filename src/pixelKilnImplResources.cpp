@@ -10,10 +10,7 @@
 
 #include "vulkanTranslate.h"
 
-// Orders this transfer submission after earlier transfer submissions (they may run concurrently on the same queue),
-// e.g. two uploads into the same buffer, or an upload after a download of it. Transfer stages only, so it is legal on
-// transfer-only queue families.
-static void transferBarrier(vk::CommandBuffer commandBuffer)
+void PixelKilnImpl::transferBarrier(vk::CommandBuffer commandBuffer)
 {
     vk::MemoryBarrier2 barrier{};
     barrier.srcStageMask = vk::PipelineStageFlagBits2::eAllTransfer;
