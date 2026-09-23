@@ -76,13 +76,14 @@ struct TestWindow {
     }
 };
 
-static uint64_t createSwapchain(PixelKiln &kiln, const TestWindow &window)
+static uint64_t createSwapchain(PixelKiln &kiln, const TestWindow &window, uint32_t maxFramesInFlight = 2)
 {
     uint32_t width, height;
     window.framebufferSize(width, height);
     SwapchainDesc desc{};
     desc.width = width;
     desc.height = height;
+    desc.maxFramesInFlight = maxFramesInFlight;
     return kiln.createSwapchain(window.native(), desc);
 }
 
@@ -97,7 +98,7 @@ static uint64_t loadSolid(PixelKiln &kiln, uint64_t swapchain)
     return kiln.loadRasterDrawProgram(program);
 }
 
-static void drawSolid(PixelKiln &kiln, uint64_t program, uint64_t image, const float (&color)[4])
+static uint64_t drawSolid(PixelKiln &kiln, uint64_t program, uint64_t image, const float (&color)[4])
 {
     ProgramCall call{};
     call.type = PROGRAM_TYPE_RASTER_DRAW;
@@ -105,7 +106,7 @@ static void drawSolid(PixelKiln &kiln, uint64_t program, uint64_t image, const f
     call.bindings = {{.data = color, .size = sizeof(color)}};
     call.colorTargets = {{image, true, {0.0f, 0.0f, 0.0f, 1.0f}}};
     call.vertexCount = 3;
-    kiln.call(call);
+    return kiln.call(call);
 }
 
 // Pixel (x, y) of a downloaded swapchain image as packRgba, whatever the channel order of the format.
@@ -167,6 +168,31 @@ TEST(window_many_frames)
         kiln.present(swapchain);
     }
     kiln.waitIdle();
+}
+
+// Acquire returns only once the frame maxFramesInFlight presents back is done on the GPU. 16 is more than any swapchain
+// here has images, so the driver's own throttling is what limits it.
+TEST(window_frames_in_flight)
+{
+    TestWindow window(128, 128);
+    PixelKiln kiln;
+    for (uint32_t maxFramesInFlight : {1u, 2u, 16u}) {
+        uint64_t swapchain = createSwapchain(kiln, window, maxFramesInFlight);
+        uint64_t solid = loadSolid(kiln, swapchain);
+        const float color[4] = {0.5f, 0.5f, 1.0f, 1.0f};
+        std::vector<uint64_t> tickets;
+        for (int frame = 0; frame < 40; frame++) {
+            glfwPollEvents();
+            uint64_t image = kiln.acquireSwapchainImage(swapchain);
+            REQUIRE(image != 0);
+            if (tickets.size() >= maxFramesInFlight) {
+                CHECK(kiln.isComplete(tickets[tickets.size() - maxFramesInFlight]));
+            }
+            tickets.push_back(drawSolid(kiln, solid, image, color));
+            kiln.present(swapchain);
+        }
+        kiln.destroySwapchain(swapchain);
+    }
 }
 
 // Acquire and present without any call in between: present consumes the acquire itself.

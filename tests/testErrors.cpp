@@ -265,6 +265,9 @@ TEST(errors_swapchain_arguments)
     desc = {};
     desc.format = static_cast<ImageFormat>(99);
     CHECK_THROWS_INVALID(kiln.createSwapchain({NATIVE_WINDOW_COCOA_VIEW, nullptr, notAWindow}, desc));
+    desc = {};
+    desc.maxFramesInFlight = 0;
+    CHECK_THROWS_INVALID(kiln.createSwapchain({NATIVE_WINDOW_COCOA_VIEW, nullptr, notAWindow}, desc));
 
     CHECK_THROWS_INVALID(kiln.destroySwapchain(999));
     CHECK_THROWS_INVALID(kiln.resizeSwapchain(999, 10, 10));

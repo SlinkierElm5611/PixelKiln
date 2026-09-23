@@ -118,6 +118,7 @@ private:
         std::vector<AcquireSemaphore> acquireSemaphores;
         int64_t acquiredIndex = -1; // image index between acquire and present
         int64_t pendingAcquire = -1; // acquireSemaphores index signalled by acquire and not yet waited on
+        std::deque<uint64_t> presentValues; // all values of the latest presents, oldest first
         bool needsRecreate = true;
     };
     struct PendingDestroy {

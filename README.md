@@ -106,6 +106,9 @@ kiln.present(swapchain);
 kiln.destroySwapchain(swapchain);
 ```
 
+`acquireSwapchainImage` also paces the CPU: it sleeps until fewer than `SwapchainDesc::maxFramesInFlight` (default 2)
+earlier frames are unfinished on the GPU. Set it to 1 for the lowest latency.
+
 With GLFW (create the window with `GLFW_CLIENT_API` set to `GLFW_NO_API`), the native handles are:
 
 ```cpp

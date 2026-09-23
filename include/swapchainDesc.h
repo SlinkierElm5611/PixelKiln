@@ -23,6 +23,9 @@ struct SwapchainDesc {
     ImageFormat format = IMAGE_FORMAT_BGRA8_UNORM; // preferred, getSwapchainInfo reports the one actually used
     PresentMode presentMode = PRESENT_MODE_VSYNC;
     ImageUsageFlags usage = IMAGE_USAGE_COLOR_TARGET; // IMAGE_USAGE_COLOR_TARGET and/or IMAGE_USAGE_STORAGE
+    // How far the CPU may run ahead: acquireSwapchainImage waits until the frame maxFramesInFlight presents back is done
+    // on the GPU. 1 gives the lowest latency, more lets the CPU record the next frame while the GPU renders this one.
+    uint32_t maxFramesInFlight = 2;
 };
 
 struct SwapchainInfo {

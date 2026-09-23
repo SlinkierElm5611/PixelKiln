@@ -46,6 +46,9 @@ uint64_t PixelKilnImpl::createSwapchain(const NativeWindow &window, const Swapch
     if (static_cast<unsigned>(desc.presentMode) >= PRESENT_MODE_COUNT) {
         throw std::invalid_argument("PixelKiln: invalid PresentMode");
     }
+    if (desc.maxFramesInFlight == 0) {
+        throw std::invalid_argument("PixelKiln: swapchain maxFramesInFlight must be at least 1");
+    }
     const ImageUsageFlags allowedUsage = IMAGE_USAGE_COLOR_TARGET | IMAGE_USAGE_STORAGE;
     if (desc.usage == 0 || (desc.usage & ~allowedUsage)) {
         throw std::invalid_argument("PixelKiln: swapchain usage must be IMAGE_USAGE_COLOR_TARGET and/or IMAGE_USAGE_STORAGE");
@@ -285,6 +288,12 @@ uint64_t PixelKilnImpl::acquireSwapchainImage(uint64_t handle) {
     if (swapchain.acquiredIndex >= 0) {
         throw std::invalid_argument("PixelKiln: present the acquired swapchain image before acquiring another");
     }
+    // Paced here with a sleeping wait: left to the driver, some (NVIDIA on X11) busy-wait inside vkQueuePresentKHR
+    // while the application runs ahead of the display.
+    while (swapchain.presentValues.size() >= swapchain.desc.maxFramesInFlight) {
+        waitValue(QUEUE_ALL, swapchain.presentValues.front());
+        swapchain.presentValues.pop_front();
+    }
     for (int attempt = 0; attempt < 2; attempt++) {
         if (swapchain.needsRecreate && !recreateSwapchain(handle, swapchain)) {
             return 0;
@@ -372,6 +381,7 @@ void PixelKilnImpl::present(uint64_t handle) {
         swapchain.pendingAcquire = -1;
     }
     flushBatch(swapchain.renderedSemaphores[index]);
+    swapchain.presentValues.push_back(ticket);
 
     image.layout = vk::ImageLayout::ePresentSrcKHR;
     image.lastAllUse = ticket;
