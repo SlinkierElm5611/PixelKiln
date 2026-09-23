@@ -24,6 +24,15 @@ target_include_directories(PixelKiln PUBLIC include PRIVATE src)
 
 target_link_libraries(PixelKiln PRIVATE Vulkan::Vulkan)
 
+# Vulkan Memory Allocator (git submodule external/VulkanMemoryAllocator), header only. Its implementation is compiled
+# in src/vmaImplementation.cpp; SYSTEM keeps its warnings out of PixelKiln's own.
+if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/external/VulkanMemoryAllocator/CMakeLists.txt)
+    message(FATAL_ERROR "PixelKiln: external/VulkanMemoryAllocator is missing, run: git submodule update --init")
+endif()
+set(VMA_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+add_subdirectory(external/VulkanMemoryAllocator EXCLUDE_FROM_ALL SYSTEM)
+target_link_libraries(PixelKiln PRIVATE GPUOpen::VulkanMemoryAllocator)
+
 # Window systems. On Linux each one is compiled in when its headers are available; nothing extra is linked because
 # surface creation only hands the application's handles to Vulkan.
 if(APPLE)

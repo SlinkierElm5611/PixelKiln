@@ -139,7 +139,6 @@ void PixelKilnImpl::selectPhysicalDevice() {
         throw std::runtime_error("PixelKiln: no Vulkan 1.3 device with timeline semaphores, dynamic rendering and "
                                  "synchronization2 found");
     }
-    m_memoryProperties = m_physicalDevice.getMemoryProperties();
     for (int format = IMAGE_FORMAT_UNDEFINED + 1; format < IMAGE_FORMAT_COUNT; format++) {
         m_formatFeatures[format] =
             m_physicalDevice.getFormatProperties(toVkFormat(static_cast<ImageFormat>(format))).optimalTilingFeatures;
@@ -246,6 +245,17 @@ void PixelKilnImpl::createDevice() {
 
     m_allQueue = m_device.getQueue(m_allFamily, 0);
     m_transferQueue = m_device.getQueue(m_transferFamily, transferIndex);
+}
+
+void PixelKilnImpl::createAllocator() {
+    VmaAllocatorCreateInfo allocatorInfo{};
+    allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+    allocatorInfo.instance = m_instance;
+    allocatorInfo.physicalDevice = m_physicalDevice;
+    allocatorInfo.device = m_device;
+    if (vmaCreateAllocator(&allocatorInfo, &m_allocator) != VK_SUCCESS) {
+        throw std::runtime_error("PixelKiln: creating the memory allocator failed");
+    }
 }
 
 void PixelKilnImpl::createSyncObjects() {
@@ -490,14 +500,12 @@ void PixelKilnImpl::destroyAll() {
         }
         m_programs.clear();
         for (auto& [handle, buffer] : m_buffers) {
-            m_device.destroyBuffer(buffer.buffer);
-            m_device.freeMemory(buffer.memory);
+            vmaDestroyBuffer(m_allocator, buffer.buffer, buffer.allocation);
         }
         m_buffers.clear();
         for (auto& [handle, image] : m_images) {
             m_device.destroyImageView(image.view);
-            m_device.destroyImage(image.image);
-            m_device.freeMemory(image.memory);
+            vmaDestroyImage(m_allocator, image.image, image.allocation);
         }
         m_images.clear();
         for (auto& [key, sampler] : m_samplers) {
@@ -512,6 +520,8 @@ void PixelKilnImpl::destroyAll() {
         destroyStagingBuffer(m_uniformRing.staging);
         destroyStagingBuffer(m_uploadRing.staging);
         destroyStagingBuffer(m_readback);
+        vmaDestroyAllocator(m_allocator); // after everything allocated from it, before the device
+        m_allocator = nullptr;
         m_device.destroyCommandPool(m_allCommandPool);
         m_device.destroyCommandPool(m_transferCommandPool);
         m_device.destroySemaphore(m_allTimeline);
@@ -540,6 +550,7 @@ PixelKilnImpl::PixelKilnImpl(Config config)
         createInstance();
         selectPhysicalDevice();
         createDevice();
+        createAllocator();
         createSyncObjects();
         createUniformRing();
     } catch (...) {

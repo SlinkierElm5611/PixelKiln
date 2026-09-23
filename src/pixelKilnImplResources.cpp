@@ -66,39 +66,11 @@ static void transferImageBarrier(vk::CommandBuffer commandBuffer, vk::Image imag
     commandBuffer.pipelineBarrier2(dependency);
 }
 
-vk::DeviceMemory PixelKilnImpl::allocateMemory(vk::MemoryRequirements requirements, vk::MemoryPropertyFlags required,
-                                               vk::MemoryPropertyFlags preferred, bool* coherent) {
-    std::vector<uint32_t> candidates;
-    for (vk::MemoryPropertyFlags flags : {required | preferred, required}) {
-        for (uint32_t i = 0; i < m_memoryProperties.memoryTypeCount; i++) {
-            if ((requirements.memoryTypeBits & (1u << i)) &&
-                (m_memoryProperties.memoryTypes[i].propertyFlags & flags) == flags &&
-                std::find(candidates.begin(), candidates.end(), i) == candidates.end()) {
-                candidates.push_back(i);
-            }
-        }
+static void checkAllocation(VkResult result)
+{
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("PixelKiln: allocating GPU memory failed (VkResult " + std::to_string(result) + ")");
     }
-    if (candidates.empty()) {
-        throw std::runtime_error("PixelKiln: no suitable memory type");
-    }
-    for (size_t i = 0; i < candidates.size(); i++) {
-        vk::MemoryAllocateInfo allocateInfo{};
-        allocateInfo.allocationSize = requirements.size;
-        allocateInfo.memoryTypeIndex = candidates[i];
-        try {
-            vk::DeviceMemory memory = m_device.allocateMemory(allocateInfo);
-            if (coherent) {
-                *coherent = static_cast<bool>(m_memoryProperties.memoryTypes[candidates[i]].propertyFlags &
-                                              vk::MemoryPropertyFlagBits::eHostCoherent);
-            }
-            return memory;
-        } catch (const vk::OutOfDeviceMemoryError &) {
-            if (i + 1 == candidates.size()) {
-                throw;
-            }
-        }
-    }
-    throw std::runtime_error("PixelKiln: no suitable memory type"); // unreachable
 }
 
 // Resources used by both queues are shared concurrently when the queues are in different families, so no queue
@@ -135,38 +107,37 @@ PixelKilnImpl::Buffer PixelKilnImpl::createDeviceBuffer(uint64_t size, vk::Buffe
     bufferInfo.usage = usage;
     uint32_t families[2];
     applySharingMode(bufferInfo, families);
-    buffer.buffer = m_device.createBuffer(bufferInfo);
-    try {
-        buffer.memory = allocateMemory(m_device.getBufferMemoryRequirements(buffer.buffer), {},
-                                       vk::MemoryPropertyFlagBits::eDeviceLocal);
-        m_device.bindBufferMemory(buffer.buffer, buffer.memory, 0);
-    } catch (...) {
-        m_device.destroyBuffer(buffer.buffer);
-        m_device.freeMemory(buffer.memory);
-        throw;
-    }
+    VmaAllocationCreateInfo allocationInfo{};
+    allocationInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    VkBuffer created = VK_NULL_HANDLE;
+    checkAllocation(vmaCreateBuffer(m_allocator, &static_cast<const VkBufferCreateInfo &>(bufferInfo), &allocationInfo,
+                                    &created, &buffer.allocation, nullptr));
+    buffer.buffer = created;
     return buffer;
 }
 
 PixelKilnImpl::StagingBuffer PixelKilnImpl::createMappedBuffer(uint64_t size, vk::BufferUsageFlags usage,
-                                                              vk::MemoryPropertyFlags required,
-                                                              vk::MemoryPropertyFlags preferred) {
+                                                              VmaMemoryUsage memoryUsage,
+                                                              VmaAllocationCreateFlags hostAccess) {
     StagingBuffer staging;
     staging.size = size;
     vk::BufferCreateInfo bufferInfo{};
     bufferInfo.size = size;
     bufferInfo.usage = usage;
     bufferInfo.sharingMode = vk::SharingMode::eExclusive;
-    staging.buffer = m_device.createBuffer(bufferInfo);
-    try {
-        staging.memory = allocateMemory(m_device.getBufferMemoryRequirements(staging.buffer), required, preferred,
-                                        &staging.coherent);
-        m_device.bindBufferMemory(staging.buffer, staging.memory, 0);
-        staging.mapped = m_device.mapMemory(staging.memory, 0, VK_WHOLE_SIZE);
-    } catch (...) {
-        destroyStagingBuffer(staging);
-        throw;
+    VmaAllocationCreateInfo allocationInfo{};
+    allocationInfo.usage = memoryUsage;
+    allocationInfo.flags = hostAccess | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    allocationInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    if (hostAccess & VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT) {
+        allocationInfo.requiredFlags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     }
+    VkBuffer created = VK_NULL_HANDLE;
+    VmaAllocationInfo allocated{};
+    checkAllocation(vmaCreateBuffer(m_allocator, &static_cast<const VkBufferCreateInfo &>(bufferInfo), &allocationInfo,
+                                    &created, &staging.allocation, &allocated));
+    staging.buffer = created;
+    staging.mapped = allocated.pMappedData;
     return staging;
 }
 
@@ -174,35 +145,29 @@ PixelKilnImpl::StagingBuffer PixelKilnImpl::createMappedBuffer(uint64_t size, vk
 // memory and are invalidated before reading when it isn't coherent (common on discrete GPUs).
 PixelKilnImpl::StagingBuffer PixelKilnImpl::createStagingBuffer(uint64_t size, bool readback) {
     if (readback) {
-        return createMappedBuffer(size, vk::BufferUsageFlagBits::eTransferDst, vk::MemoryPropertyFlagBits::eHostVisible,
-                                  vk::MemoryPropertyFlagBits::eHostCached);
+        return createMappedBuffer(size, vk::BufferUsageFlagBits::eTransferDst, VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                  VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT);
     }
-    return createMappedBuffer(size, vk::BufferUsageFlagBits::eTransferSrc,
-                              vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent, {});
+    return createMappedBuffer(size, vk::BufferUsageFlagBits::eTransferSrc, VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                              VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 }
 
 // Calls write their uniforms straight into this ring and the GPU reads them from there: no staging copy and no
 // transfer submission per call. Device local host-visible memory (resizable BAR, unified memory) when available.
 void PixelKilnImpl::createUniformRing() {
     m_uniformRing.staging = createMappedBuffer(UNIFORM_RING_SIZE, vk::BufferUsageFlagBits::eUniformBuffer,
-                                               vk::MemoryPropertyFlagBits::eHostVisible |
-                                               vk::MemoryPropertyFlagBits::eHostCoherent,
-                                               vk::MemoryPropertyFlagBits::eDeviceLocal);
+                                               VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+                                               VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 }
 
 void PixelKilnImpl::destroyStagingBuffer(const StagingBuffer &staging) {
-    m_device.destroyBuffer(staging.buffer);
-    m_device.freeMemory(staging.memory); // implicitly unmaps
+    if (staging.buffer) { // also called on never created buffers, possibly before the allocator exists
+        vmaDestroyBuffer(m_allocator, staging.buffer, staging.allocation);
+    }
 }
 
 void PixelKilnImpl::readStagingBuffer(const StagingBuffer &staging, uint64_t offset, void* data, uint64_t size) {
-    if (!staging.coherent) {
-        vk::MappedMemoryRange range{};
-        range.memory = staging.memory;
-        range.offset = 0;
-        range.size = VK_WHOLE_SIZE;
-        m_device.invalidateMappedMemoryRanges(range);
-    }
+    vmaInvalidateAllocation(m_allocator, staging.allocation, offset, size); // nothing to do for coherent memory
     std::memcpy(data, static_cast<const char*>(staging.mapped) + offset, size);
 }
 
@@ -300,10 +265,9 @@ void PixelKilnImpl::destroyBuffer(uint64_t buffer) {
     collectGarbage();
     Buffer destroyed = getBuffer(buffer);
     m_buffers.erase(buffer);
-    vk::Device device = m_device;
-    deferDestroy(destroyed.lastAllUse, destroyed.lastTransferUse, [device, destroyed]() {
-        device.destroyBuffer(destroyed.buffer);
-        device.freeMemory(destroyed.memory);
+    VmaAllocator allocator = m_allocator;
+    deferDestroy(destroyed.lastAllUse, destroyed.lastTransferUse, [allocator, destroyed]() {
+        vmaDestroyBuffer(allocator, destroyed.buffer, destroyed.allocation);
     });
 }
 
@@ -438,11 +402,17 @@ uint64_t PixelKilnImpl::createImage(const ImageDesc &desc) {
     if (transferable) {
         applySharingMode(imageInfo, families);
     }
-    image.image = m_device.createImage(imageInfo);
+    VmaAllocationCreateInfo allocationInfo{};
+    allocationInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (desc.usage & (IMAGE_USAGE_COLOR_TARGET | IMAGE_USAGE_DEPTH_TARGET)) {
+        // Render targets get memory of their own, as VMA recommends (large, often recreated on resize).
+        allocationInfo.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+    }
+    VkImage created = VK_NULL_HANDLE;
+    checkAllocation(vmaCreateImage(m_allocator, &static_cast<const VkImageCreateInfo &>(imageInfo), &allocationInfo,
+                                   &created, &image.allocation, nullptr));
+    image.image = created;
     try {
-        image.memory = allocateMemory(m_device.getImageMemoryRequirements(image.image), {},
-                                      vk::MemoryPropertyFlagBits::eDeviceLocal);
-        m_device.bindImageMemory(image.image, image.memory, 0);
         vk::ImageViewCreateInfo viewInfo{};
         viewInfo.image = image.image;
         viewInfo.viewType = vk::ImageViewType::e2D;
@@ -450,8 +420,7 @@ uint64_t PixelKilnImpl::createImage(const ImageDesc &desc) {
         viewInfo.subresourceRange = vk::ImageSubresourceRange(image.aspect, 0, 1, 0, 1);
         image.view = m_device.createImageView(viewInfo);
     } catch (...) {
-        m_device.destroyImage(image.image);
-        m_device.freeMemory(image.memory);
+        vmaDestroyImage(m_allocator, image.image, image.allocation);
         throw;
     }
     uint64_t handle = m_nextHandle++;
@@ -488,10 +457,10 @@ void PixelKilnImpl::destroyImage(uint64_t image) {
     }
     m_images.erase(image);
     vk::Device device = m_device;
-    deferDestroy(destroyed.lastAllUse, destroyed.lastTransferUse, [device, destroyed]() {
+    VmaAllocator allocator = m_allocator;
+    deferDestroy(destroyed.lastAllUse, destroyed.lastTransferUse, [device, allocator, destroyed]() {
         device.destroyImageView(destroyed.view);
-        device.destroyImage(destroyed.image);
-        device.freeMemory(destroyed.memory);
+        vmaDestroyImage(allocator, destroyed.image, destroyed.allocation);
     });
 }
 
@@ -549,10 +518,9 @@ void PixelKilnImpl::uploadImage(uint64_t image, const void* data, uint64_t size)
     if (useRing) {
         m_uploadRing.regions.push_back({stagingOffset, size, value});
     } else {
-        vk::Device device = m_device;
-        deferDestroy(0, value, [device, staging]() {
-            device.destroyBuffer(staging.buffer);
-            device.freeMemory(staging.memory);
+        VmaAllocator allocator = m_allocator;
+        deferDestroy(0, value, [allocator, staging]() {
+            vmaDestroyBuffer(allocator, staging.buffer, staging.allocation);
         });
     }
 }

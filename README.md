@@ -4,7 +4,13 @@ A Vulkan-based, bare-bones gpu acceleration library.
 
 In this library, there are two kinds of resources, buffers and images.
 
-The programmer is responsible for allocating and freeing these resources from the PixelKiln API.
+The programmer is responsible for allocating and freeing these resources from the PixelKiln API. Their memory is
+sub-allocated with the [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator)
+(VMA), so creating many small resources is cheap. VMA is a git submodule, fetch it before building:
+
+```sh
+git submodule update --init
+```
 
 ## GPU programs
 
@@ -128,12 +134,8 @@ On macOS, `createSwapchain` with `NATIVE_WINDOW_COCOA_VIEW` must be called on th
 `CAMetalLayer` to the view); pass your own layer with `NATIVE_WINDOW_METAL_LAYER` to avoid that. On Linux, X11 (Xlib,
 xcb) and Wayland support is compiled in when their development headers are found.
 
-`examples/common/exampleWindow.h` shows the full GLFW setup used by the windowed examples. GLFW is a git submodule used
-only by those examples and the window tests:
-
-```sh
-git submodule update --init
-```
+`examples/common/exampleWindow.h` shows the full GLFW setup used by the windowed examples. GLFW, the other git
+submodule, is used only by those examples and the window tests.
 
 ## Examples
 

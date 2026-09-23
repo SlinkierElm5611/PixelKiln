@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <vulkan/vulkan.hpp>
+#include <vk_mem_alloc.h>
 
 #include "computeProgram.h"
 #include "config.h"
@@ -32,9 +33,10 @@ class PixelKilnImpl
 private:
     enum QueueKind { QUEUE_ALL, QUEUE_TRANSFER };
 
+    // Memory comes from VMA, which sub-allocates from large blocks instead of one vkAllocateMemory per resource.
     struct Buffer {
         vk::Buffer buffer;
-        vk::DeviceMemory memory;
+        VmaAllocation allocation = nullptr;
         uint64_t size = 0;
         uint64_t lastAllUse = 0;
         uint64_t lastTransferUse = 0;
@@ -42,7 +44,7 @@ private:
     struct Image {
         vk::Image image;
         vk::ImageView view;
-        vk::DeviceMemory memory;
+        VmaAllocation allocation = nullptr; // null for swapchain images
         ImageDesc desc;
         vk::ImageAspectFlags aspect;
         vk::ImageLayout layout = vk::ImageLayout::eUndefined; // layout after all recorded work
@@ -65,10 +67,9 @@ private:
     };
     struct StagingBuffer {
         vk::Buffer buffer;
-        vk::DeviceMemory memory;
-        void* mapped = nullptr;
+        VmaAllocation allocation = nullptr;
+        void* mapped = nullptr; // persistently mapped
         uint64_t size = 0;
-        bool coherent = true;
     };
     struct RingRegion {
         uint64_t offset;
@@ -139,10 +140,10 @@ private:
     VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE;
     vk::PhysicalDevice m_physicalDevice;
     vk::PhysicalDeviceProperties m_physicalDeviceProperties;
-    vk::PhysicalDeviceMemoryProperties m_memoryProperties;
     vk::FormatFeatureFlags m_formatFeatures[IMAGE_FORMAT_COUNT] = {}; // optimal tiling features of each ImageFormat
     vk::SampleCountFlags m_integerColorSampleCounts; // framebufferIntegerColorSampleCounts
     vk::Device m_device;
+    VmaAllocator m_allocator = nullptr;
 
     uint32_t m_allFamily = 0;
     uint32_t m_transferFamily = 0;
@@ -184,6 +185,7 @@ private:
     void createInstance();
     void selectPhysicalDevice();
     void createDevice();
+    void createAllocator();
     void createSyncObjects();
     void destroyAll();
     uint64_t completedValue(QueueKind queue);
@@ -208,10 +210,6 @@ private:
     void collectGarbage();
 
     // pixelKilnImplResources.cpp
-    // Tries the memory types with required | preferred first, then those with just required when the preferred heap
-    // is exhausted (e.g. a small BAR heap, or VRAM full).
-    vk::DeviceMemory allocateMemory(vk::MemoryRequirements requirements, vk::MemoryPropertyFlags required,
-                                    vk::MemoryPropertyFlags preferred, bool* coherent = nullptr);
     void applySharingMode(vk::BufferCreateInfo &info, uint32_t* families);
     void applySharingMode(vk::ImageCreateInfo &info, uint32_t* families);
     // Orders this transfer submission after earlier transfer submissions (they may run concurrently on the same
@@ -219,8 +217,10 @@ private:
     // it is legal on transfer-only queue families.
     void transferBarrier(vk::CommandBuffer commandBuffer);
     Buffer createDeviceBuffer(uint64_t size, vk::BufferUsageFlags usage);
-    StagingBuffer createMappedBuffer(uint64_t size, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags required,
-                                     vk::MemoryPropertyFlags preferred);
+    // Host-visible buffer mapped for its whole life. Sequential write access gets coherent memory (no flushes needed),
+    // random access (readback) prefers cached memory.
+    StagingBuffer createMappedBuffer(uint64_t size, vk::BufferUsageFlags usage, VmaMemoryUsage memoryUsage,
+                                     VmaAllocationCreateFlags hostAccess);
     StagingBuffer createStagingBuffer(uint64_t size, bool readback);
     void createUniformRing();
     void destroyStagingBuffer(const StagingBuffer &staging);
