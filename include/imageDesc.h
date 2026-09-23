@@ -22,6 +22,10 @@ struct ImageDesc {
     uint32_t height = 1;
     ImageFormat format = IMAGE_FORMAT_RGBA8_UNORM;
     ImageUsageFlags usage = IMAGE_USAGE_SAMPLED;
+    // Samples per pixel: 1, or 2, 4, 8... for a multisampled (MSAA) color or depth target, see
+    // PixelKiln::getSupportedSampleCounts. Multisampled images can also be sampled (texelFetch on a sampler2DMS), but
+    // not be storage images, uploaded or downloaded: resolve them into a single sample image (ColorTarget).
+    uint32_t samples = 1;
 };
 
 #endif //PIXELKILN_IMAGEDESC_H

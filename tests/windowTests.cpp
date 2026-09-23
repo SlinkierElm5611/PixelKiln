@@ -6,6 +6,7 @@
 // -DPIXELKILN_TEST_WINDOW=ON (see tests/CMakeLists.txt). Tests run on the main thread, as AppKit requires.
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -294,4 +295,57 @@ TEST(window_misuse)
     CHECK_THROWS_INVALID(drawSolid(kiln, wrongFormat, image, color));
     drawSolid(kiln, solid, image, color);
     kiln.present(swapchain);
+}
+
+// A multisampled target resolved straight into the window's image, which isn't otherwise rendered to.
+TEST(window_msaa_resolve)
+{
+    TestWindow window(160, 120);
+    PixelKiln kiln;
+    uint64_t swapchain = createSwapchain(kiln, window);
+    SwapchainInfo info = kiln.getSwapchainInfo(swapchain);
+    uint32_t samples = 0;
+    for (uint32_t count : {4u, 8u, 2u}) {
+        if (kiln.getSupportedSampleCounts(info.format) & count) {
+            samples = count;
+            break;
+        }
+    }
+    if (!samples) {
+        std::printf("  skipped: the window's format can't be multisampled\n");
+        return;
+    }
+    RasterDrawProgram program{};
+    program.vertexShader = shaderFrom(backgroundVertSpirv);
+    program.fragmentShader = shaderFrom(solidFragSpirv);
+    program.uniformBindings = {UNIFORM_BINDING_TYPE_BUFFER};
+    program.colorFormats = {info.format};
+    program.samples = samples;
+    uint64_t draw = kiln.loadRasterDrawProgram(program);
+    uint64_t target = kiln.createImage({info.width, info.height, info.format, IMAGE_USAGE_COLOR_TARGET, samples});
+
+    const float color[4] = {0.25f, 0.5f, 1.0f, 1.0f};
+    for (int frame = 0; frame < 12; frame++) {
+        TestWindow::pumpEvents();
+        uint64_t image = kiln.acquireSwapchainImage(swapchain);
+        REQUIRE(image != 0);
+        ProgramCall call{};
+        call.type = PROGRAM_TYPE_RASTER_DRAW;
+        call.program = draw;
+        call.bindings = {{.data = color, .size = sizeof(color)}};
+        call.colorTargets = {{.image = target, .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}, .resolveImage = image,
+                              .store = false}};
+        call.vertexCount = 3;
+        kiln.call(call);
+        if (frame % 4 == 0) {
+            std::vector<uint8_t> pixels(size_t(info.width) * info.height * 4);
+            kiln.downloadImage(image, pixels.data(), pixels.size());
+            CHECK(nearRgba(swapchainPixel(pixels, info.format, info.width, info.width / 2, info.height / 2),
+                           packRgba(64, 128, 255, 255)));
+            CHECK(nearRgba(swapchainPixel(pixels, info.format, info.width, 0, info.height - 1),
+                           packRgba(64, 128, 255, 255)));
+        }
+        kiln.present(swapchain);
+    }
+    kiln.destroySwapchain(swapchain);
 }

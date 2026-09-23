@@ -338,15 +338,16 @@ void PixelKilnImpl::present(uint64_t handle) {
     const uint32_t index = static_cast<uint32_t>(swapchain.acquiredIndex);
     Image &image = m_images.at(swapchain.images[index]);
 
-    // Nothing rendered to it this frame: its contents are undefined and the acquire semaphore is still pending.
-    std::vector<vk::Semaphore> acquireWaits;
-    vk::ImageLayout oldLayout = image.layout;
-    if (swapchain.pendingAcquire >= 0) {
-        acquireWaits.push_back(swapchain.acquireSemaphores[static_cast<size_t>(swapchain.pendingAcquire)].semaphore);
-        oldLayout = vk::ImageLayout::eUndefined;
+    // Nothing rendered to it this frame: its contents are undefined and the acquire semaphore is still pending. Calls
+    // already in the batch are submitted first so they don't wait for the window.
+    const bool acquirePending = swapchain.pendingAcquire >= 0;
+    if (acquirePending && m_batch.callCount > 0) {
+        flushBatch();
     }
+    const vk::ImageLayout oldLayout = acquirePending ? vk::ImageLayout::eUndefined : image.layout;
 
-    vk::CommandBuffer commandBuffer = beginCommands(QUEUE_ALL);
+    // The transition ends the open batch, which is submitted signalling the semaphore the presentation waits for.
+    vk::CommandBuffer commandBuffer = batchCommands();
     vk::ImageMemoryBarrier2 barrier{};
     barrier.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands;
     barrier.srcAccessMask = vk::AccessFlagBits2::eMemoryWrite;
@@ -362,15 +363,18 @@ void PixelKilnImpl::present(uint64_t handle) {
     dependency.imageMemoryBarrierCount = 1;
     dependency.pImageMemoryBarriers = &barrier;
     commandBuffer.pipelineBarrier2(dependency);
-    uint64_t ticket = submitCommands(QUEUE_ALL, commandBuffer, image.lastTransferUse, acquireWaits,
-                                     swapchain.renderedSemaphores[index]);
+    const uint64_t ticket = ++m_allValue;
+    m_batch.waitTransfer = std::max(m_batch.waitTransfer, image.lastTransferUse);
+    if (acquirePending) {
+        AcquireSemaphore &acquire = swapchain.acquireSemaphores[static_cast<size_t>(swapchain.pendingAcquire)];
+        m_batch.acquireWaits.push_back(acquire.semaphore);
+        acquire.allValue = ticket;
+        swapchain.pendingAcquire = -1;
+    }
+    flushBatch(swapchain.renderedSemaphores[index]);
 
     image.layout = vk::ImageLayout::ePresentSrcKHR;
     image.lastAllUse = ticket;
-    if (swapchain.pendingAcquire >= 0) {
-        swapchain.acquireSemaphores[static_cast<size_t>(swapchain.pendingAcquire)].allValue = ticket;
-        swapchain.pendingAcquire = -1;
-    }
     swapchain.acquiredIndex = -1;
 
     VkSemaphore rendered = static_cast<VkSemaphore>(swapchain.renderedSemaphores[index]);

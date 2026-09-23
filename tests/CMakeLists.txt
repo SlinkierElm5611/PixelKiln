@@ -6,9 +6,10 @@
 #
 # Tests run under the Khronos validation layer with synchronization validation. Validation messages are printed to
 # help debugging, but a test's pass/fail comes from its own CHECK/CHECK_EQ/REQUIRE assertions (the process exit
-# code), not from validation layer output: the layer has known false positives (e.g. its shader-access heuristic,
-# and cross-queue-family timeline semaphore synchronization validation) that don't reflect real bugs. The layer
-# comes with the Vulkan SDK; without it the tests still run, just unvalidated.
+# code), not from validation layer output: older layers have known false positives (the Vulkan SDK 1.3.290 one
+# mistracks timeline semaphores, e.g. across queues, around presents, and waits between two signalled values) that
+# don't reflect real bugs. The 1.4.357 layer reports nothing on this suite. The layer comes with the Vulkan SDK;
+# without it the tests still run, just unvalidated.
 
 option(PIXELKILN_TEST_VALIDATION "Run tests under the validation layer (with sync validation)" ON)
 set(PIXELKILN_TEST_DRIVER_FILES "" CACHE STRING
@@ -35,7 +36,9 @@ pixelkiln_add_shaders(PixelKilnTests
     shaders/textured.vert
     shaders/textured.frag
     shaders/background.vert
-    shaders/instanced.vert)
+    shaders/instanced.vert
+    shaders/msaaCoverage.comp
+    shaders/uintValue.frag)
 
 # Test names are the TEST(name) declarations at the start of a line. Editing a test source re-runs configure.
 function(pixelkiln_scan_tests outVariable)
@@ -57,11 +60,17 @@ if(WIN32)
 else()
     set(LAYER_SEPARATOR ":")
 endif()
+# Layers from Vulkan SDK 1.4 on only read the VK_LAYER_ names, older ones the VK_KHRONOS_VALIDATION_ ones. The shader
+# accesses heuristic is what makes the layer check storage buffers and images used by shaders at all.
 set(VALIDATION_ENVIRONMENT
     VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true
     VK_KHRONOS_VALIDATION_SYNCVAL_SHADER_ACCESSES_HEURISTIC=true
     VK_KHRONOS_VALIDATION_REPORT_FLAGS=error,warn
-    VK_KHRONOS_VALIDATION_DEBUG_ACTION=VK_DBG_LAYER_ACTION_LOG_MSG)
+    VK_KHRONOS_VALIDATION_DEBUG_ACTION=VK_DBG_LAYER_ACTION_LOG_MSG
+    VK_LAYER_VALIDATE_SYNC=true
+    VK_LAYER_SYNCVAL_SHADER_ACCESSES_HEURISTIC=true
+    VK_LAYER_REPORT_FLAGS=error,warn
+    VK_LAYER_DEBUG_ACTION=VK_DBG_LAYER_ACTION_LOG_MSG)
 
 # Registers one ctest test. `environment` is the name of a list variable with extra environment entries,
 # `extraLayer` is appended below the validation layer.
@@ -141,7 +150,7 @@ if(PIXELKILN_TEST_WINDOW)
     foreach(test ${WINDOW_TEST_NAMES})
         pixelkiln_add_test(${test} window $<TARGET_FILE:PixelKilnWindowTests> ${test})
     endforeach()
-    foreach(example Particles ReactionDiffusion Mandelbrot)
+    foreach(example Particles ReactionDiffusion Mandelbrot TorusKnot)
         pixelkiln_add_test(example.${example} "example;window" $<TARGET_FILE:${example}> --frames 120)
     endforeach()
     add_test(NAME window_test_names_in_sync COMMAND $<TARGET_FILE:PixelKilnWindowTests> --verify ${WINDOW_TEST_NAMES})

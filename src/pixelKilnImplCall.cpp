@@ -8,7 +8,6 @@
 #include <array>
 #include <cstring>
 #include <stdexcept>
-#include <unordered_set>
 
 #include "vulkanTranslate.h"
 
@@ -24,13 +23,29 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
     const vk::PhysicalDeviceLimits &limits = m_physicalDeviceProperties.limits;
 
     // Validate everything before anything is allocated or recorded.
+    struct UsedImage {
+        uint64_t handle;
+        Image* image;
+        vk::ImageLayout layout; // layout the call needs it in
+        bool target = false;
+        bool discard = false; // cleared target, its old contents can be dropped
+    };
     std::vector<Buffer*> usedBuffers;
-    std::unordered_map<uint64_t, vk::ImageLayout> usedImages; // image handle -> layout the call needs it in
-    std::unordered_set<uint64_t> clearedImages; // targets that are cleared, their old contents can be dropped
-    auto useImage = [&](uint64_t handle, vk::ImageLayout layout) {
-        checkSwapchainImage(m_images.at(handle));
-        auto [it, inserted] = usedImages.emplace(handle, layout);
-        if (!inserted && it->second != layout) {
+    std::vector<UsedImage> usedImages;
+    auto findImage = [&](uint64_t handle) -> UsedImage* {
+        for (UsedImage &used : usedImages) {
+            if (used.handle == handle) {
+                return &used;
+            }
+        }
+        return nullptr;
+    };
+    auto useImage = [&](uint64_t handle, Image &image, vk::ImageLayout layout) {
+        checkSwapchainImage(image);
+        UsedImage* used = findImage(handle);
+        if (!used) {
+            usedImages.push_back({handle, &image, layout});
+        } else if (used->layout != layout) {
             throw std::invalid_argument("PixelKiln: an image can't be used in two different ways by the same call");
         }
     };
@@ -69,7 +84,7 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
                     throw std::invalid_argument("PixelKiln: this device can't linearly filter the image's format");
                 }
                 getSampler(binding.sampler);
-                useImage(binding.resource, vk::ImageLayout::eShaderReadOnlyOptimal);
+                useImage(binding.resource, image, vk::ImageLayout::eShaderReadOnlyOptimal);
                 break;
             }
             case UNIFORM_BINDING_TYPE_STORAGE_IMAGE: {
@@ -77,7 +92,7 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
                 if (!(image.desc.usage & IMAGE_USAGE_STORAGE)) {
                     throw std::invalid_argument("PixelKiln: storage image binding needs an image created with IMAGE_USAGE_STORAGE");
                 }
-                useImage(binding.resource, vk::ImageLayout::eGeneral);
+                useImage(binding.resource, image, vk::ImageLayout::eGeneral);
                 break;
             }
             default:
@@ -85,34 +100,54 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
         }
         hasDescriptors = true;
     }
+    if (uniformSize > UNIFORM_RING_SIZE) {
+        throw std::invalid_argument("PixelKiln: a call's uniform data is larger than the uniform ring");
+    }
 
     vk::Extent2D extent{};
     if (program.type == PROGRAM_TYPE_RASTER_DRAW) {
         if (call.colorTargets.size() != program.colorFormats.size()) {
             throw std::invalid_argument("PixelKiln: a draw needs one color target per program color format");
         }
-        auto useTarget = [&](uint64_t handle, ImageFormat format, ImageUsage usage, bool clear, vk::ImageLayout layout) {
+        // discard: the call overwrites all of it (cleared targets, resolve targets), its old contents are dropped.
+        auto useTarget = [&](uint64_t handle, ImageFormat format, ImageUsage usage, uint32_t samples, bool discard,
+                             vk::ImageLayout layout) {
             Image &image = getImage(handle);
             if (!(image.desc.usage & usage) || image.desc.format != format) {
                 throw std::invalid_argument("PixelKiln: target image usage or format does not match the program");
+            }
+            if (image.desc.samples != samples) {
+                throw std::invalid_argument(samples == 1 ? "PixelKiln: a resolve target must be a single sample image"
+                                                         : "PixelKiln: target sample count does not match the program");
             }
             if (extent.width == 0) {
                 extent = vk::Extent2D(image.desc.width, image.desc.height);
             } else if (extent.width != image.desc.width || extent.height != image.desc.height) {
                 throw std::invalid_argument("PixelKiln: all targets of a draw must be the same size");
             }
-            useImage(handle, layout);
-            if (clear) {
-                clearedImages.insert(handle);
+            if (UsedImage* used = findImage(handle)) {
+                throw std::invalid_argument(used->target ? "PixelKiln: an image can only be one target of a call"
+                                                         : "PixelKiln: an image can't be used in two different ways by "
+                                                           "the same call");
             }
+            checkSwapchainImage(image);
+            usedImages.push_back({handle, &image, layout, true, discard});
         };
         for (size_t i = 0; i < call.colorTargets.size(); i++) {
-            useTarget(call.colorTargets[i].image, program.colorFormats[i], IMAGE_USAGE_COLOR_TARGET,
-                      call.colorTargets[i].clear, vk::ImageLayout::eColorAttachmentOptimal);
+            const ColorTarget &target = call.colorTargets[i];
+            useTarget(target.image, program.colorFormats[i], IMAGE_USAGE_COLOR_TARGET, program.samples, target.clear,
+                      vk::ImageLayout::eColorAttachmentOptimal);
+            if (target.resolveImage) {
+                if (program.samples == 1) {
+                    throw std::invalid_argument("PixelKiln: only multisampled targets can be resolved");
+                }
+                useTarget(target.resolveImage, program.colorFormats[i], IMAGE_USAGE_COLOR_TARGET, 1, true,
+                          vk::ImageLayout::eColorAttachmentOptimal);
+            }
         }
         if (program.depthFormat != IMAGE_FORMAT_UNDEFINED) {
-            useTarget(call.depthTarget.image, program.depthFormat, IMAGE_USAGE_DEPTH_TARGET, call.depthTarget.clear,
-                      vk::ImageLayout::eDepthStencilAttachmentOptimal);
+            useTarget(call.depthTarget.image, program.depthFormat, IMAGE_USAGE_DEPTH_TARGET, program.samples,
+                      call.depthTarget.clear, vk::ImageLayout::eDepthStencilAttachmentOptimal);
         } else if (call.depthTarget.image != 0) {
             throw std::invalid_argument("PixelKiln: depth target given for a program without a depth format");
         }
@@ -134,36 +169,30 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
         }
     }
 
-    // Step 1: stage the uniform data and upload it on the transfer queue.
-    const uint64_t uniformRegionSize = alignUp(uniformSize, uniformAlignment);
+    // Step 1: the uniform data goes straight into the ring the GPU reads it from.
+    const uint64_t ticket = m_allValue + 1;
     uint64_t uniformBase = 0;
-    uint64_t uniformUpload = 0;
     if (uniformSize > 0) {
-        uniformBase = allocateUniforms(uniformRegionSize);
+        uniformBase = allocateRing(m_uniformRing, uniformSize, uniformAlignment);
         for (size_t i = 0; i < call.bindings.size(); i++) {
             if (program.bindings[i] == UNIFORM_BINDING_TYPE_BUFFER) {
-                std::memcpy(static_cast<char*>(m_uniformStaging.mapped) + uniformBase + uniformOffsets[i],
+                std::memcpy(static_cast<char*>(m_uniformRing.staging.mapped) + uniformBase + uniformOffsets[i],
                             call.bindings[i].data, call.bindings[i].size);
             }
         }
-        vk::CommandBuffer transfer = beginCommands(QUEUE_TRANSFER);
-        transferBarrier(transfer);
-        vk::BufferCopy region{uniformBase, uniformBase, uniformSize};
-        transfer.copyBuffer(m_uniformStaging.buffer, m_uniformBuffer.buffer, region);
-        // The region was last read by a call that has completed (m_uniformReuseValue or earlier); waiting on it
-        // orders the overwrite after that read without stalling.
-        uniformUpload = submitCommands(QUEUE_TRANSFER, transfer, m_uniformReuseValue);
     }
 
-    // Step 2: record the program on the all queue.
+    // Step 2: descriptors, pushed while recording or written to a set allocated for this call.
     vk::DescriptorSet descriptorSet;
+    std::vector<vk::DescriptorBufferInfo> bufferInfos;
+    std::vector<vk::DescriptorImageInfo> imageInfos;
+    std::vector<vk::WriteDescriptorSet> writes;
     if (hasDescriptors) {
-        descriptorSet = allocateDescriptorSet(program.setLayout);
-        std::vector<vk::DescriptorBufferInfo> bufferInfos;
-        std::vector<vk::DescriptorImageInfo> imageInfos;
+        if (!program.pushDescriptors) {
+            descriptorSet = allocateDescriptorSet(program.setLayout);
+        }
         bufferInfos.reserve(call.bindings.size());
         imageInfos.reserve(call.bindings.size());
-        std::vector<vk::WriteDescriptorSet> writes;
         for (size_t i = 0; i < call.bindings.size(); i++) {
             const CallBinding &binding = call.bindings[i];
             if (program.bindings[i] == UNIFORM_BINDING_TYPE_EMPTY) {
@@ -176,7 +205,8 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
             write.descriptorType = toVkDescriptorType(program.bindings[i]);
             switch (program.bindings[i]) {
                 case UNIFORM_BINDING_TYPE_BUFFER:
-                    bufferInfos.emplace_back(m_uniformBuffer.buffer, uniformBase + uniformOffsets[i], binding.size);
+                    bufferInfos.emplace_back(m_uniformRing.staging.buffer, uniformBase + uniformOffsets[i],
+                                             binding.size);
                     write.pBufferInfo = &bufferInfos.back();
                     break;
                 case UNIFORM_BINDING_TYPE_STORAGE_BUFFER:
@@ -195,10 +225,37 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
             }
             writes.push_back(write);
         }
-        m_device.updateDescriptorSets(writes, nullptr);
+        if (descriptorSet) {
+            m_device.updateDescriptorSets(writes, nullptr);
+        }
+    }
+    auto bindDescriptors = [&](vk::CommandBuffer commandBuffer, vk::PipelineBindPoint bindPoint) {
+        if (descriptorSet) {
+            commandBuffer.bindDescriptorSets(bindPoint, program.pipelineLayout, 0, descriptorSet, nullptr);
+        } else if (!writes.empty()) {
+            m_cmdPushDescriptorSet(commandBuffer, static_cast<VkPipelineBindPoint>(bindPoint), program.pipelineLayout,
+                                   0, static_cast<uint32_t>(writes.size()),
+                                   reinterpret_cast<const VkWriteDescriptorSet*>(writes.data()));
+        }
+    };
+
+    // A swapchain image used for the first time since it was acquired: the batch waits for the acquire. Calls already
+    // in the batch are submitted first, so they don't wait for the window as well.
+    std::vector<Swapchain*> acquiredSwapchains;
+    for (const UsedImage &used : usedImages) {
+        if (used.image->swapchain) {
+            Swapchain &swapchain = m_swapchains.at(used.image->swapchain);
+            if (swapchain.pendingAcquire >= 0) {
+                acquiredSwapchains.push_back(&swapchain);
+            }
+        }
+    }
+    if (!acquiredSwapchains.empty() && m_batch.callCount > 0) {
+        flushBatch();
     }
 
-    vk::CommandBuffer commandBuffer = beginCommands(QUEUE_ALL);
+    // Step 3: record the program into the open batch.
+    vk::CommandBuffer commandBuffer = batchCommands();
 
     // Orders this call after everything earlier on the all queue (e.g. a compute writing a storage buffer that this
     // draw reads as vertices) and moves images into the layouts this call needs.
@@ -208,24 +265,24 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
     memoryBarrier.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;
     memoryBarrier.dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
     std::vector<vk::ImageMemoryBarrier2> imageBarriers;
-    for (const auto& [handle, layout] : usedImages) {
-        Image &image = m_images.at(handle);
-        vk::ImageLayout oldLayout = clearedImages.count(handle) ? vk::ImageLayout::eUndefined : image.layout;
-        if (oldLayout != layout) {
+    for (const UsedImage &used : usedImages) {
+        Image &image = *used.image;
+        vk::ImageLayout oldLayout = used.discard ? vk::ImageLayout::eUndefined : image.layout;
+        if (oldLayout != used.layout) {
             vk::ImageMemoryBarrier2 barrier{};
             barrier.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands;
             barrier.srcAccessMask = vk::AccessFlagBits2::eMemoryWrite;
             barrier.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;
             barrier.dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
             barrier.oldLayout = oldLayout;
-            barrier.newLayout = layout;
+            barrier.newLayout = used.layout;
             barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             barrier.image = image.image;
             barrier.subresourceRange = vk::ImageSubresourceRange(image.aspect, 0, 1, 0, 1);
             imageBarriers.push_back(barrier);
         }
-        image.layout = layout;
+        image.layout = used.layout;
     }
     vk::DependencyInfo dependency{};
     dependency.memoryBarrierCount = 1;
@@ -236,21 +293,26 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
 
     if (program.type == PROGRAM_TYPE_COMPUTE) {
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, program.pipeline);
-        if (descriptorSet) {
-            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, program.pipelineLayout, 0,
-                                             descriptorSet, nullptr);
-        }
+        bindDescriptors(commandBuffer, vk::PipelineBindPoint::eCompute);
         commandBuffer.dispatch(call.groupCountX, call.groupCountY, call.groupCountZ);
     } else {
         std::vector<vk::RenderingAttachmentInfo> colorAttachments;
-        for (const ColorTarget &target : call.colorTargets) {
+        for (size_t i = 0; i < call.colorTargets.size(); i++) {
+            const ColorTarget &target = call.colorTargets[i];
             vk::RenderingAttachmentInfo attachment{};
             attachment.imageView = m_images.at(target.image).view;
             attachment.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
             attachment.loadOp = target.clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad;
-            attachment.storeOp = vk::AttachmentStoreOp::eStore;
+            attachment.storeOp = target.store ? vk::AttachmentStoreOp::eStore : vk::AttachmentStoreOp::eDontCare;
             attachment.clearValue.color = vk::ClearColorValue(std::array<float, 4>{
                 target.clearColor[0], target.clearColor[1], target.clearColor[2], target.clearColor[3]});
+            if (target.resolveImage) {
+                // Integer samples can't be averaged, those resolve to sample 0.
+                attachment.resolveMode = isIntegerFormat(program.colorFormats[i]) ? vk::ResolveModeFlagBits::eSampleZero
+                                                                                 : vk::ResolveModeFlagBits::eAverage;
+                attachment.resolveImageView = m_images.at(target.resolveImage).view;
+                attachment.resolveImageLayout = vk::ImageLayout::eColorAttachmentOptimal;
+            }
             colorAttachments.push_back(attachment);
         }
         const bool hasDepth = program.depthFormat != IMAGE_FORMAT_UNDEFINED;
@@ -259,7 +321,8 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
             depthAttachment.imageView = m_images.at(call.depthTarget.image).view;
             depthAttachment.imageLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
             depthAttachment.loadOp = call.depthTarget.clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad;
-            depthAttachment.storeOp = vk::AttachmentStoreOp::eStore;
+            depthAttachment.storeOp = call.depthTarget.store ? vk::AttachmentStoreOp::eStore
+                                                             : vk::AttachmentStoreOp::eDontCare;
             depthAttachment.clearValue.depthStencil = vk::ClearDepthStencilValue(call.depthTarget.clearDepth, 0);
         }
         vk::RenderingInfo renderingInfo{};
@@ -273,10 +336,7 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, program.pipeline);
         commandBuffer.setViewport(0, vk::Viewport(0.0f, 0.0f, float(extent.width), float(extent.height), 0.0f, 1.0f));
         commandBuffer.setScissor(0, vk::Rect2D({0, 0}, extent));
-        if (descriptorSet) {
-            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, program.pipelineLayout, 0,
-                                             descriptorSet, nullptr);
-        }
+        bindDescriptors(commandBuffer, vk::PipelineBindPoint::eGraphics);
         if (!call.vertexBuffers.empty()) {
             std::vector<vk::Buffer> vertexBuffers;
             for (uint64_t vertexBuffer : call.vertexBuffers) {
@@ -294,45 +354,35 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
         commandBuffer.endRendering();
     }
 
-    // Step 3: submit, waiting for this call's uniform upload and any pending upload into a resource it uses.
-    uint64_t waitTransfer = uniformUpload;
+    // The batch waits for any pending upload into a resource this call uses.
+    m_allValue = ticket;
+    m_batch.callCount++;
     for (Buffer* buffer : usedBuffers) {
-        waitTransfer = std::max(waitTransfer, buffer->lastTransferUse);
-    }
-    for (const auto& [handle, layout] : usedImages) {
-        waitTransfer = std::max(waitTransfer, m_images.at(handle).lastTransferUse);
-    }
-    // A swapchain image rendered to for the first time since it was acquired: wait for the acquire.
-    std::vector<vk::Semaphore> acquireWaits;
-    std::vector<Swapchain*> acquiredSwapchains;
-    for (const auto& [handle, layout] : usedImages) {
-        uint64_t swapchainHandle = m_images.at(handle).swapchain;
-        if (swapchainHandle) {
-            Swapchain &swapchain = m_swapchains.at(swapchainHandle);
-            if (swapchain.pendingAcquire >= 0) {
-                acquireWaits.push_back(swapchain.acquireSemaphores[static_cast<size_t>(swapchain.pendingAcquire)].semaphore);
-                acquiredSwapchains.push_back(&swapchain);
-            }
-        }
-    }
-    uint64_t ticket = submitCommands(QUEUE_ALL, commandBuffer, waitTransfer, acquireWaits);
-    for (Swapchain* swapchain : acquiredSwapchains) {
-        swapchain->acquireSemaphores[static_cast<size_t>(swapchain->pendingAcquire)].allValue = ticket;
-        swapchain->pendingAcquire = -1;
-    }
-
-    for (Buffer* buffer : usedBuffers) {
+        m_batch.waitTransfer = std::max(m_batch.waitTransfer, buffer->lastTransferUse);
         buffer->lastAllUse = ticket;
     }
-    for (const auto& [handle, layout] : usedImages) {
-        m_images.at(handle).lastAllUse = ticket;
+    for (const UsedImage &used : usedImages) {
+        m_batch.waitTransfer = std::max(m_batch.waitTransfer, used.image->lastTransferUse);
+        used.image->lastAllUse = ticket;
+    }
+    for (Swapchain* swapchain : acquiredSwapchains) {
+        AcquireSemaphore &acquire = swapchain->acquireSemaphores[static_cast<size_t>(swapchain->pendingAcquire)];
+        m_batch.acquireWaits.push_back(acquire.semaphore);
+        acquire.allValue = ticket;
+        swapchain->pendingAcquire = -1;
     }
     program.lastAllUse = ticket;
     if (descriptorSet) {
         m_descriptorPool.lastAllUse = ticket;
     }
     if (uniformSize > 0) {
-        m_uniformRegions.push_back({uniformBase, uniformRegionSize, ticket});
+        m_uniformRing.regions.push_back({uniformBase, uniformSize, ticket});
+    }
+
+    // Submitted right away while the all queue has nothing to do, otherwise batched with the calls that follow until
+    // the queue runs dry, the batch is full, or something needs the results.
+    if (m_batch.callCount >= MAX_BATCH_CALLS || completedValue(QUEUE_ALL) >= m_allSubmitted) {
+        flushBatch();
     }
     return ticket;
 }

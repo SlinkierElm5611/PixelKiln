@@ -10,6 +10,8 @@
 #include <cstring>
 #include <stdexcept>
 
+#include "vulkanTranslate.h"
+
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT,
                                                     VkDebugUtilsMessageTypeFlagsEXT,
                                                     const VkDebugUtilsMessengerCallbackDataEXT* data, void*)
@@ -127,6 +129,10 @@ void PixelKilnImpl::selectPhysicalDevice() {
             bestScore = score;
             m_physicalDevice = device;
             m_physicalDeviceProperties = properties;
+            m_integerColorSampleCounts = device.getProperties2<vk::PhysicalDeviceProperties2,
+                                                               vk::PhysicalDeviceVulkan12Properties>()
+                                             .get<vk::PhysicalDeviceVulkan12Properties>()
+                                             .framebufferIntegerColorSampleCounts;
         }
     }
     if (bestScore < 0) {
@@ -134,6 +140,10 @@ void PixelKilnImpl::selectPhysicalDevice() {
                                  "synchronization2 found");
     }
     m_memoryProperties = m_physicalDevice.getMemoryProperties();
+    for (int format = IMAGE_FORMAT_UNDEFINED + 1; format < IMAGE_FORMAT_COUNT; format++) {
+        m_formatFeatures[format] =
+            m_physicalDevice.getFormatProperties(toVkFormat(static_cast<ImageFormat>(format))).optimalTilingFeatures;
+    }
 }
 
 void PixelKilnImpl::createDevice() {
@@ -203,6 +213,12 @@ void PixelKilnImpl::createDevice() {
             extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
             m_swapchainSupport = true;
         }
+        if (std::strcmp(extension.extensionName.data(), VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME) == 0) {
+            extensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+            auto properties = m_physicalDevice.getProperties2<vk::PhysicalDeviceProperties2,
+                                                              vk::PhysicalDevicePushDescriptorPropertiesKHR>();
+            m_maxPushDescriptors = properties.get<vk::PhysicalDevicePushDescriptorPropertiesKHR>().maxPushDescriptors;
+        }
     }
 
     vk::PhysicalDeviceVulkan13Features features13{};
@@ -219,6 +235,14 @@ void PixelKilnImpl::createDevice() {
     deviceCreateInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     deviceCreateInfo.ppEnabledExtensionNames = extensions.data();
     m_device = m_physicalDevice.createDevice(deviceCreateInfo);
+    if (m_maxPushDescriptors > 0) {
+        // Extension commands aren't exported by the loader.
+        m_cmdPushDescriptorSet = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(
+            m_device.getProcAddr("vkCmdPushDescriptorSetKHR"));
+        if (!m_cmdPushDescriptorSet) {
+            m_maxPushDescriptors = 0;
+        }
+    }
 
     m_allQueue = m_device.getQueue(m_allFamily, 0);
     m_transferQueue = m_device.getQueue(m_transferFamily, transferIndex);
@@ -242,10 +266,39 @@ void PixelKilnImpl::createSyncObjects() {
 }
 
 uint64_t PixelKilnImpl::completedValue(QueueKind queue) {
-    return m_device.getSemaphoreCounterValue(queue == QUEUE_ALL ? m_allTimeline : m_transferTimeline);
+    if (queue == QUEUE_TRANSFER) {
+        return m_device.getSemaphoreCounterValue(m_transferTimeline);
+    }
+    uint64_t completed = m_device.getSemaphoreCounterValue(m_allTimeline);
+    while (!m_allSignals.empty() && m_allSignals.front() <= completed) {
+        m_allRetiredSignal = m_allSignals.front();
+        m_allSignals.pop_front();
+    }
+    return completed;
+}
+
+uint64_t PixelKilnImpl::submittedValue(uint64_t allValue) {
+    if (allValue == 0) {
+        return 0;
+    }
+    if (allValue > m_allSubmitted) {
+        flushBatch();
+    }
+    // A signal also covers every earlier submission on the queue, so any signal >= the ticket will do.
+    auto signal = std::lower_bound(m_allSignals.begin(), m_allSignals.end(), allValue);
+    if (signal != m_allSignals.end()) {
+        return *signal;
+    }
+    if (m_allRetiredSignal < allValue) {
+        throw std::logic_error("PixelKiln: waiting for a ticket that was never submitted");
+    }
+    return m_allRetiredSignal;
 }
 
 void PixelKilnImpl::waitValue(QueueKind queue, uint64_t value) {
+    if (queue == QUEUE_ALL) {
+        value = submittedValue(value);
+    }
     if (value == 0) {
         return;
     }
@@ -292,7 +345,7 @@ uint64_t PixelKilnImpl::submitCommands(QueueKind queue, vk::CommandBuffer comman
     // its signal from waiting on draws/dispatches when both queue references point to the same queue.
     const vk::PipelineStageFlags2 stages = transfer ? vk::PipelineStageFlagBits2::eAllTransfer
                                                     : vk::PipelineStageFlagBits2::eAllCommands;
-    uint64_t &value = transfer ? m_transferValue : m_allValue;
+    const uint64_t value = transfer ? m_transferValue + 1 : m_allValue;
 
     std::vector<vk::SemaphoreSubmitInfo> waitInfos;
     if (waitValue > 0) {
@@ -310,7 +363,7 @@ uint64_t PixelKilnImpl::submitCommands(QueueKind queue, vk::CommandBuffer comman
     }
     std::vector<vk::SemaphoreSubmitInfo> signalInfos(1);
     signalInfos[0].semaphore = transfer ? m_transferTimeline : m_allTimeline;
-    signalInfos[0].value = value + 1;
+    signalInfos[0].value = value;
     signalInfos[0].stageMask = stages;
     if (binarySignal) {
         vk::SemaphoreSubmitInfo signalInfo{};
@@ -329,7 +382,12 @@ uint64_t PixelKilnImpl::submitCommands(QueueKind queue, vk::CommandBuffer comman
     submitInfo.signalSemaphoreInfoCount = static_cast<uint32_t>(signalInfos.size());
     submitInfo.pSignalSemaphoreInfos = signalInfos.data();
     (transfer ? m_transferQueue : m_allQueue).submit2(submitInfo);
-    value++;
+    if (transfer) {
+        m_transferValue = value;
+    } else {
+        m_allSubmitted = value;
+        m_allSignals.push_back(value);
+    }
 
     std::vector<CommandBuffer> &commandBuffers = transfer ? m_transferCommandBuffers : m_allCommandBuffers;
     for (auto& entry : commandBuffers) {
@@ -338,6 +396,26 @@ uint64_t PixelKilnImpl::submitCommands(QueueKind queue, vk::CommandBuffer comman
         }
     }
     return value;
+}
+
+vk::CommandBuffer PixelKilnImpl::batchCommands() {
+    if (!m_batch.commandBuffer) {
+        m_batch.commandBuffer = beginCommands(QUEUE_ALL);
+    }
+    return m_batch.commandBuffer;
+}
+
+void PixelKilnImpl::flushBatch(vk::Semaphore binarySignal) {
+    if (!m_batch.commandBuffer && !binarySignal) {
+        return;
+    }
+    vk::CommandBuffer commandBuffer = batchCommands();
+    Batch batch = std::move(m_batch);
+    m_batch = {};
+    if (m_allValue == m_allSubmitted) {
+        m_allValue++; // nothing took a ticket (a call threw after opening the batch), the signal still needs a value
+    }
+    submitCommands(QUEUE_ALL, commandBuffer, batch.waitTransfer, batch.acquireWaits, binarySignal);
 }
 
 void PixelKilnImpl::deferDestroy(uint64_t allValue, uint64_t transferValue, std::function<void()> destroy) {
@@ -361,7 +439,16 @@ void PixelKilnImpl::collectGarbage() {
     m_pendingDestroys.swap(remaining);
 }
 
+void PixelKilnImpl::flush() {
+    flushBatch();
+    collectGarbage();
+}
+
 bool PixelKilnImpl::isComplete(uint64_t ticket) {
+    // A pending ticket is submitted now, otherwise polling it would never see it complete.
+    if (ticket <= m_allValue) {
+        submittedValue(ticket);
+    }
     return completedValue(QUEUE_ALL) >= ticket;
 }
 
@@ -381,6 +468,12 @@ void PixelKilnImpl::waitIdle() {
 
 void PixelKilnImpl::destroyAll() {
     if (m_device) {
+        if (m_batch.commandBuffer) {
+            try {
+                flushBatch(); // may hold swapchain acquire waits, which must not stay pending
+            } catch (...) {
+            }
+        }
         for (auto& [handle, swapchain] : m_swapchains) {
             teardownSwapchain(swapchain);
         }
@@ -416,9 +509,9 @@ void PixelKilnImpl::destroyAll() {
             m_device.destroyDescriptorPool(pool.pool);
         }
         m_retiredDescriptorPools.clear();
-        destroyStagingBuffer(m_uniformStaging);
-        m_device.destroyBuffer(m_uniformBuffer.buffer);
-        m_device.freeMemory(m_uniformBuffer.memory);
+        destroyStagingBuffer(m_uniformRing.staging);
+        destroyStagingBuffer(m_uploadRing.staging);
+        destroyStagingBuffer(m_readback);
         m_device.destroyCommandPool(m_allCommandPool);
         m_device.destroyCommandPool(m_transferCommandPool);
         m_device.destroySemaphore(m_allTimeline);

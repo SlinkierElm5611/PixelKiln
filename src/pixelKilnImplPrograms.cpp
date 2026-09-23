@@ -17,7 +17,8 @@ PixelKilnImpl::Program &PixelKilnImpl::getProgram(uint64_t program) {
 }
 
 // Binding i of set 0 is uniformBindings[i], EMPTY entries leave a hole.
-vk::DescriptorSetLayout PixelKilnImpl::createSetLayout(const UniformBindings &bindings, vk::ShaderStageFlags stages) {
+vk::DescriptorSetLayout PixelKilnImpl::createSetLayout(const UniformBindings &bindings, vk::ShaderStageFlags stages,
+                                                       bool &pushDescriptors) {
     std::vector<vk::DescriptorSetLayoutBinding> layoutBindings;
     uint32_t counts[UNIFORM_BINDING_TYPE_COUNT] = {};
     for (size_t i = 0; i < bindings.size(); i++) {
@@ -34,7 +35,11 @@ vk::DescriptorSetLayout PixelKilnImpl::createSetLayout(const UniformBindings &bi
         }
         layoutBindings.push_back(binding);
     }
+    pushDescriptors = !layoutBindings.empty() && layoutBindings.size() <= m_maxPushDescriptors;
     vk::DescriptorSetLayoutCreateInfo layoutInfo{};
+    if (pushDescriptors) {
+        layoutInfo.flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
+    }
     layoutInfo.bindingCount = static_cast<uint32_t>(layoutBindings.size());
     layoutInfo.pBindings = layoutBindings.data();
     return m_device.createDescriptorSetLayout(layoutInfo);
@@ -57,7 +62,8 @@ uint64_t PixelKilnImpl::loadComputeProgram(const ComputeProgram &program) {
     loaded.bindings = program.uniformBindings;
     vk::ShaderModule shaderModule = createShaderModule(program.computeShader);
     try {
-        loaded.setLayout = createSetLayout(program.uniformBindings, vk::ShaderStageFlagBits::eCompute);
+        loaded.setLayout = createSetLayout(program.uniformBindings, vk::ShaderStageFlagBits::eCompute,
+                                           loaded.pushDescriptors);
         vk::PipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.setLayoutCount = 1;
         layoutInfo.pSetLayouts = &loaded.setLayout;
@@ -116,6 +122,19 @@ uint64_t PixelKilnImpl::loadRasterDrawProgram(const RasterDrawProgram &program) 
             throw std::invalid_argument("PixelKiln: depth format can't be rendered to on this device");
         }
     }
+    const vk::SampleCountFlagBits samples = toVkSampleCount(program.samples);
+    if (program.samples > 1) {
+        for (ImageFormat format : program.colorFormats) {
+            if (!(getSupportedSampleCounts(format) & program.samples)) {
+                throw std::invalid_argument("PixelKiln: this device can't render the program's sample count to one "
+                                            "of its color formats");
+            }
+        }
+        if (hasDepth && !(getSupportedSampleCounts(program.depthFormat) & program.samples)) {
+            throw std::invalid_argument("PixelKiln: this device can't render the program's sample count to its depth "
+                                        "format");
+        }
+    }
 
     const VertexLayout &vertexLayout = program.vertexLayout;
     if (vertexLayout.buffers.size() > limits.maxVertexInputBindings ||
@@ -158,6 +177,7 @@ uint64_t PixelKilnImpl::loadRasterDrawProgram(const RasterDrawProgram &program) 
     loaded.bindings = program.uniformBindings;
     loaded.colorFormats = program.colorFormats;
     loaded.depthFormat = program.depthFormat;
+    loaded.samples = program.samples;
     loaded.vertexBufferCount = static_cast<uint32_t>(vertexLayout.buffers.size());
 
     vk::ShaderModule vertexModule = createShaderModule(program.vertexShader);
@@ -165,7 +185,8 @@ uint64_t PixelKilnImpl::loadRasterDrawProgram(const RasterDrawProgram &program) 
     try {
         fragmentModule = createShaderModule(program.fragmentShader);
         loaded.setLayout = createSetLayout(program.uniformBindings,
-                                           vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment);
+                                           vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
+                                           loaded.pushDescriptors);
         vk::PipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.setLayoutCount = 1;
         layoutInfo.pSetLayouts = &loaded.setLayout;
@@ -200,7 +221,8 @@ uint64_t PixelKilnImpl::loadRasterDrawProgram(const RasterDrawProgram &program) 
         rasterization.lineWidth = 1.0f;
 
         vk::PipelineMultisampleStateCreateInfo multisample{};
-        multisample.rasterizationSamples = vk::SampleCountFlagBits::e1;
+        multisample.rasterizationSamples = samples;
+        multisample.alphaToCoverageEnable = program.alphaToCoverage;
 
         vk::PipelineDepthStencilStateCreateInfo depthStencil{};
         depthStencil.depthTestEnable = program.depthTest;

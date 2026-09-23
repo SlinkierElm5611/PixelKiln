@@ -4,6 +4,7 @@
 
 // Transfer queue / all queue interplay: uploads overlapping calls, resources moving between uses, ring reuse.
 
+#include <chrono>
 #include <cstdint>
 #include <vector>
 
@@ -209,4 +210,85 @@ TEST(texture_reupload_while_sampled)
     }
     CHECK_EQ(wrongA, 0);
     CHECK_EQ(wrongB, 0);
+}
+
+// Calls may wait in a batch while the GPU is busy. Polling isComplete alone must get them submitted and finished,
+// and flush() submits them without waiting.
+TEST(batched_calls_complete_when_polled)
+{
+    PixelKiln kiln;
+    uint64_t program = kiln.loadComputeProgram({shaderFrom(storeSpirv),
+                                                {UNIFORM_BINDING_TYPE_BUFFER, UNIFORM_BINDING_TYPE_STORAGE_BUFFER}});
+    const uint32_t slots = 64;
+    uint64_t output = kiln.createBuffer(slots * sizeof(uint32_t));
+    auto storeAll = [&](uint32_t base) {
+        uint64_t ticket = 0;
+        for (uint32_t i = 0; i < 1000; i++) {
+            const uint32_t params[2] = {i % slots, base + i};
+            ProgramCall call{};
+            call.type = PROGRAM_TYPE_COMPUTE;
+            call.program = program;
+            call.bindings = {{.data = params, .size = sizeof(params)}, {.resource = output}};
+            ticket = kiln.call(call);
+        }
+        return ticket;
+    };
+    uint64_t ticket = storeAll(0);
+    const auto start = std::chrono::steady_clock::now();
+    while (!kiln.isComplete(ticket)) {
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(30));
+    }
+    ticket = storeAll(5000);
+    kiln.flush();
+    kiln.wait(ticket);
+    std::vector<uint32_t> values = download<uint32_t>(kiln, output, slots);
+    int wrong = 0;
+    for (uint32_t k = 0; k < slots; k++) {
+        wrong += values[k] != 5000 + k + slots * ((999 - k) / slots);
+    }
+    CHECK_EQ(wrong, 0);
+}
+
+// A frame loop whose render target is replaced mid-stream (like a window resize), with the old target and a program
+// destroyed while calls using them may still be batched.
+TEST(destroy_while_batched)
+{
+    PixelKiln kiln;
+    RasterDrawProgram drawProgram{};
+    drawProgram.vertexShader = shaderFrom(positionVertSpirv);
+    drawProgram.fragmentShader = shaderFrom(solidFragSpirv);
+    drawProgram.uniformBindings = {UNIFORM_BINDING_TYPE_BUFFER};
+    drawProgram.vertexLayout.buffers = {{4 * sizeof(float)}};
+    drawProgram.vertexLayout.attributes = {{0, 0, VERTEX_FORMAT_FLOAT4, 0}};
+    drawProgram.colorFormats = {IMAGE_FORMAT_RGBA8_UNORM};
+    const float positions[] = {-1.0f, -1.0f, 0.0f, 1.0f, 3.0f, -1.0f, 0.0f, 1.0f, -1.0f, 3.0f, 0.0f, 1.0f};
+    uint64_t triangle = kiln.createBuffer(sizeof(positions));
+    kiln.uploadBuffer(triangle, positions, sizeof(positions));
+    uint64_t target = 0;
+    uint32_t size = 0;
+    for (int frame = 0; frame < 40; frame++) {
+        if (frame % 8 == 0) {
+            if (target) {
+                kiln.destroyImage(target);
+            }
+            size = 16 + uint32_t(frame);
+            target = kiln.createImage({size, size, IMAGE_FORMAT_RGBA8_UNORM, IMAGE_USAGE_COLOR_TARGET});
+        }
+        uint64_t draw = kiln.loadRasterDrawProgram(drawProgram);
+        const float color[4] = {float(frame) / 40.0f, 0.5f, 0.25f, 1.0f};
+        ProgramCall call{};
+        call.type = PROGRAM_TYPE_RASTER_DRAW;
+        call.program = draw;
+        call.bindings = {{.data = color, .size = sizeof(color)}};
+        call.colorTargets = {{target, true}};
+        call.vertexBuffers = {triangle};
+        call.vertexCount = 3;
+        for (int i = 0; i < 20; i++) {
+            kiln.call(call);
+        }
+        kiln.unloadProgram(draw);
+    }
+    std::vector<uint8_t> pixels = downloadPixels(kiln, target, size, size);
+    const uint32_t red = uint32_t(39.0f / 40.0f * 255.0f + 0.5f); // the last frame's color
+    CHECK(nearRgba(pixelAt(pixels, size, size / 2, size / 2), packRgba(red, 128, 64, 255)));
 }

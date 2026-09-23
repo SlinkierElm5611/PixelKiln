@@ -24,9 +24,10 @@ Large data (vertex, index and storage buffers, textures) is uploaded by the prog
 
 ## Calls
 
-A program is run by passing a `ProgramCall` to `call()`. The call first uploads its uniform data on the transfer queue,
-then runs the program on the all queue, and returns a ticket without waiting. Each queue has a timeline semaphore, so
-the next upload runs while the current draw/compute executes. On devices with a single queue both queues refer to it.
+A program is run by passing a `ProgramCall` to `call()`. The call copies its uniform data into a ring buffer the GPU
+reads it from, records the program for the all queue, and returns a ticket without waiting. Uploads and downloads run on
+the transfer queue. Each queue has a timeline semaphore, so the next upload runs while the current draw/compute
+executes. On devices with a single queue both queues refer to it.
 
 ```cpp
 PixelKiln kiln;
@@ -46,10 +47,39 @@ kiln.downloadBuffer(data, results, size); // waits for the call
 kiln.destroyBuffer(data);
 ```
 
-Uploads return once the data is staged; downloads block until every earlier use of the resource is done. Resources and
-programs can be destroyed while the GPU still uses them, destruction is deferred. PixelKiln is not thread-safe.
+Calls are submitted in batches: a call goes to the GPU right away when the GPU has nothing else to do, otherwise
+together with the calls that follow it, at the latest when something needs its results (`wait`, `isComplete`, a
+download, an upload into a resource it uses, `present`). `flush()` submits pending calls explicitly, e.g. before a long
+stretch of CPU work that doesn't use PixelKiln.
+
+Uploads return once the data is staged (uploads over 4 MiB are staged in pieces and may wait for the first ones to be
+copied); downloads block until every earlier use of the resource is done. Resources and programs can be destroyed while
+the GPU still uses them, destruction is deferred. PixelKiln is not thread-safe.
 
 See `examples/` for compute and windowed examples.
+
+## Multisampling
+
+Raster draw programs can render with MSAA: create the targets with `ImageDesc::samples` and load the program with the
+same `RasterDrawProgram::samples`. `getSupportedSampleCounts(format)` returns the counts a format supports as a bitmask;
+Vulkan guarantees 4x for depth and non-integer color formats. A multisampled color target is resolved into a single
+sample image of the same size and format, such as a swapchain image, at the end of the call. Targets whose samples
+aren't needed afterwards are marked `store = false`, so the samples are never written to memory:
+
+```cpp
+uint64_t color = kiln.createImage({width, height, format, IMAGE_USAGE_COLOR_TARGET, 4});
+uint64_t depth = kiln.createImage({width, height, IMAGE_FORMAT_D32_FLOAT, IMAGE_USAGE_DEPTH_TARGET, 4});
+program.samples = 4;
+// every frame:
+call.colorTargets = {{.image = color, .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}, .resolveImage = swapchainImage,
+                      .store = false}};
+call.depthTarget = {.image = depth, .store = false};
+```
+
+Keep `store = true` when a later call loads the target (`clear = false`) to draw more before resolving. Shaders can read
+single samples of a multisampled image created with `IMAGE_USAGE_SAMPLED` (`texelFetch` on a `sampler2DMS`), but it
+can't be a storage image, uploaded or downloaded. `RasterDrawProgram::alphaToCoverage` turns a fragment's alpha into
+the fraction of the pixel's samples it covers. Integer formats resolve to one of their samples instead of an average.
 
 ## Windowing
 
@@ -113,6 +143,7 @@ git submodule update --init
 | `Particles` | 262144 particles simulated in compute and drawn straight from the same buffer as points, with fading trails. Hold the left mouse button to pull them to the cursor |
 | `ReactionDiffusion` | Gray-Scott reaction-diffusion, 16 compute steps per frame ping-ponging two buffers, colored by a second compute pass. Paint with the mouse, `1`-`4` presets, `R` reset, `Space` pause |
 | `Mandelbrot` | Fractal explorer computed at window resolution. Drag to pan, scroll to zoom; left alone it dives into Seahorse Valley |
+| `TorusKnot` | A lit, spinning knot drawn with MSAA into multisampled color and depth targets that are resolved straight into the window. `M` toggles MSAA, `Space` pauses |
 
 The windowed examples accept `--frames N` (deterministic run of N frames) and `--screenshot file.bmp`.
 
@@ -125,8 +156,10 @@ ctest --test-dir build --output-on-failure
 ```
 
 Every `TEST(name)` in `tests/test*.cpp` and every example is its own ctest test (`ctest -L unit`, `ctest -L example`).
-Tests run under the Khronos validation layer from the Vulkan SDK and fail on any validation message
-(`-DPIXELKILN_TEST_VALIDATION=OFF` to disable). Optional cache variables add variants of every test:
+Tests run under the Khronos validation layer from the Vulkan SDK with synchronization validation
+(`-DPIXELKILN_TEST_VALIDATION=OFF` to disable). Validation messages are printed, but a test's result comes from its own
+checks, because older layers report false positives (see `tests/CMakeLists.txt`). Optional cache variables add variants
+of every test:
 
 - `PIXELKILN_TEST_DRIVER_FILES`: a list of Vulkan ICD manifests, each run as its own variant (via `VK_DRIVER_FILES`),
   to cover several drivers on one machine.

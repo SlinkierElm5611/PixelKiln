@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 
 #include "vulkanTranslate.h"
@@ -37,6 +38,12 @@ static void hostBarrier(vk::CommandBuffer commandBuffer)
     commandBuffer.pipelineBarrier2(dependency);
 }
 
+// Staging offsets are multiples of every texel size, and of 4 as transfer-only queues require for image copies.
+static uint64_t stagingAlignment(const vk::PhysicalDeviceLimits &limits)
+{
+    return std::max<uint64_t>(16, limits.optimalBufferCopyOffsetAlignment);
+}
+
 // Layout transition on the transfer queue, transfer stages only. Earlier use on the all queue is covered by the
 // submission's wait on the all timeline, which waits at the same transfer stages.
 static void transferImageBarrier(vk::CommandBuffer commandBuffer, vk::Image image, vk::ImageAspectFlags aspect,
@@ -59,29 +66,39 @@ static void transferImageBarrier(vk::CommandBuffer commandBuffer, vk::Image imag
     commandBuffer.pipelineBarrier2(dependency);
 }
 
-uint32_t PixelKilnImpl::findMemoryType(uint32_t typeBits, vk::MemoryPropertyFlags required,
-                                       vk::MemoryPropertyFlags preferred) {
+vk::DeviceMemory PixelKilnImpl::allocateMemory(vk::MemoryRequirements requirements, vk::MemoryPropertyFlags required,
+                                               vk::MemoryPropertyFlags preferred, bool* coherent) {
+    std::vector<uint32_t> candidates;
     for (vk::MemoryPropertyFlags flags : {required | preferred, required}) {
         for (uint32_t i = 0; i < m_memoryProperties.memoryTypeCount; i++) {
-            if ((typeBits & (1u << i)) && (m_memoryProperties.memoryTypes[i].propertyFlags & flags) == flags) {
-                return i;
+            if ((requirements.memoryTypeBits & (1u << i)) &&
+                (m_memoryProperties.memoryTypes[i].propertyFlags & flags) == flags &&
+                std::find(candidates.begin(), candidates.end(), i) == candidates.end()) {
+                candidates.push_back(i);
             }
         }
     }
-    throw std::runtime_error("PixelKiln: no suitable memory type");
-}
-
-vk::DeviceMemory PixelKilnImpl::allocateMemory(vk::MemoryRequirements requirements, vk::MemoryPropertyFlags required,
-                                               vk::MemoryPropertyFlags preferred, bool* coherent) {
-    uint32_t memoryType = findMemoryType(requirements.memoryTypeBits, required, preferred);
-    if (coherent) {
-        *coherent = static_cast<bool>(m_memoryProperties.memoryTypes[memoryType].propertyFlags &
-                                      vk::MemoryPropertyFlagBits::eHostCoherent);
+    if (candidates.empty()) {
+        throw std::runtime_error("PixelKiln: no suitable memory type");
     }
-    vk::MemoryAllocateInfo allocateInfo{};
-    allocateInfo.allocationSize = requirements.size;
-    allocateInfo.memoryTypeIndex = memoryType;
-    return m_device.allocateMemory(allocateInfo);
+    for (size_t i = 0; i < candidates.size(); i++) {
+        vk::MemoryAllocateInfo allocateInfo{};
+        allocateInfo.allocationSize = requirements.size;
+        allocateInfo.memoryTypeIndex = candidates[i];
+        try {
+            vk::DeviceMemory memory = m_device.allocateMemory(allocateInfo);
+            if (coherent) {
+                *coherent = static_cast<bool>(m_memoryProperties.memoryTypes[candidates[i]].propertyFlags &
+                                              vk::MemoryPropertyFlagBits::eHostCoherent);
+            }
+            return memory;
+        } catch (const vk::OutOfDeviceMemoryError &) {
+            if (i + 1 == candidates.size()) {
+                throw;
+            }
+        }
+    }
+    throw std::runtime_error("PixelKiln: no suitable memory type"); // unreachable
 }
 
 // Resources used by both queues are shared concurrently when the queues are in different families, so no queue
@@ -131,24 +148,19 @@ PixelKilnImpl::Buffer PixelKilnImpl::createDeviceBuffer(uint64_t size, vk::Buffe
     return buffer;
 }
 
-// Staging buffers are only touched by the transfer queue. Uploads use coherent memory, readbacks prefer cached
-// memory and are invalidated before reading when it isn't coherent (common on discrete GPUs).
-PixelKilnImpl::StagingBuffer PixelKilnImpl::createStagingBuffer(uint64_t size, bool readback) {
+PixelKilnImpl::StagingBuffer PixelKilnImpl::createMappedBuffer(uint64_t size, vk::BufferUsageFlags usage,
+                                                              vk::MemoryPropertyFlags required,
+                                                              vk::MemoryPropertyFlags preferred) {
     StagingBuffer staging;
+    staging.size = size;
     vk::BufferCreateInfo bufferInfo{};
     bufferInfo.size = size;
-    bufferInfo.usage = readback ? vk::BufferUsageFlagBits::eTransferDst : vk::BufferUsageFlagBits::eTransferSrc;
+    bufferInfo.usage = usage;
     bufferInfo.sharingMode = vk::SharingMode::eExclusive;
     staging.buffer = m_device.createBuffer(bufferInfo);
     try {
-        vk::MemoryRequirements requirements = m_device.getBufferMemoryRequirements(staging.buffer);
-        if (readback) {
-            staging.memory = allocateMemory(requirements, vk::MemoryPropertyFlagBits::eHostVisible,
-                                            vk::MemoryPropertyFlagBits::eHostCached, &staging.coherent);
-        } else {
-            staging.memory = allocateMemory(requirements, vk::MemoryPropertyFlagBits::eHostVisible |
-                                                          vk::MemoryPropertyFlagBits::eHostCoherent, {});
-        }
+        staging.memory = allocateMemory(m_device.getBufferMemoryRequirements(staging.buffer), required, preferred,
+                                        &staging.coherent);
         m_device.bindBufferMemory(staging.buffer, staging.memory, 0);
         staging.mapped = m_device.mapMemory(staging.memory, 0, VK_WHOLE_SIZE);
     } catch (...) {
@@ -158,12 +170,32 @@ PixelKilnImpl::StagingBuffer PixelKilnImpl::createStagingBuffer(uint64_t size, b
     return staging;
 }
 
+// Staging buffers are only touched by the transfer queue. Uploads use coherent memory, readbacks prefer cached
+// memory and are invalidated before reading when it isn't coherent (common on discrete GPUs).
+PixelKilnImpl::StagingBuffer PixelKilnImpl::createStagingBuffer(uint64_t size, bool readback) {
+    if (readback) {
+        return createMappedBuffer(size, vk::BufferUsageFlagBits::eTransferDst, vk::MemoryPropertyFlagBits::eHostVisible,
+                                  vk::MemoryPropertyFlagBits::eHostCached);
+    }
+    return createMappedBuffer(size, vk::BufferUsageFlagBits::eTransferSrc,
+                              vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent, {});
+}
+
+// Calls write their uniforms straight into this ring and the GPU reads them from there: no staging copy and no
+// transfer submission per call. Device local host-visible memory (resizable BAR, unified memory) when available.
+void PixelKilnImpl::createUniformRing() {
+    m_uniformRing.staging = createMappedBuffer(UNIFORM_RING_SIZE, vk::BufferUsageFlagBits::eUniformBuffer,
+                                               vk::MemoryPropertyFlagBits::eHostVisible |
+                                               vk::MemoryPropertyFlagBits::eHostCoherent,
+                                               vk::MemoryPropertyFlagBits::eDeviceLocal);
+}
+
 void PixelKilnImpl::destroyStagingBuffer(const StagingBuffer &staging) {
     m_device.destroyBuffer(staging.buffer);
     m_device.freeMemory(staging.memory); // implicitly unmaps
 }
 
-void PixelKilnImpl::readStagingBuffer(const StagingBuffer &staging, void* data, uint64_t size) {
+void PixelKilnImpl::readStagingBuffer(const StagingBuffer &staging, uint64_t offset, void* data, uint64_t size) {
     if (!staging.coherent) {
         vk::MappedMemoryRange range{};
         range.memory = staging.memory;
@@ -171,7 +203,59 @@ void PixelKilnImpl::readStagingBuffer(const StagingBuffer &staging, void* data, 
         range.size = VK_WHOLE_SIZE;
         m_device.invalidateMappedMemoryRanges(range);
     }
-    std::memcpy(data, staging.mapped, size);
+    std::memcpy(data, static_cast<const char*>(staging.mapped) + offset, size);
+}
+
+void PixelKilnImpl::reserveReadback(uint64_t size) {
+    if (m_readback.size >= size) {
+        return;
+    }
+    uint64_t capacity = READBACK_MIN_SIZE;
+    while (capacity < size) {
+        capacity *= 2;
+    }
+    destroyStagingBuffer(m_readback);
+    m_readback = {};
+    m_readback = createStagingBuffer(std::min(capacity, READBACK_MAX_SIZE), true);
+}
+
+uint64_t PixelKilnImpl::allocateRing(Ring &ring, uint64_t size, uint64_t alignment) {
+    if (size > ring.staging.size) {
+        throw std::logic_error("PixelKiln: ring allocation larger than the ring");
+    }
+    bool retired = false;
+    while (true) {
+        std::optional<uint64_t> offset;
+        if (ring.regions.empty()) {
+            offset = 0;
+        } else {
+            const RingRegion &oldest = ring.regions.front();
+            const RingRegion &newest = ring.regions.back();
+            const uint64_t head = alignUp(newest.offset + newest.size, alignment);
+            if (oldest.offset <= newest.offset) {
+                // Live regions don't wrap around: free space after the newest and before the oldest.
+                if (head + size <= ring.staging.size) {
+                    offset = head;
+                } else if (size <= oldest.offset) {
+                    offset = 0;
+                }
+            } else if (head + size <= oldest.offset) {
+                offset = head; // they do: free space between the newest and the oldest
+            }
+        }
+        if (offset) {
+            return *offset;
+        }
+        // Full: drop the regions whose submissions completed, then wait for the oldest one if that wasn't enough.
+        if (retired) {
+            waitValue(ring.queue, ring.regions.front().value);
+        }
+        const uint64_t completed = completedValue(ring.queue);
+        while (!ring.regions.empty() && ring.regions.front().value <= completed) {
+            ring.regions.pop_front();
+        }
+        retired = true;
+    }
 }
 
 PixelKilnImpl::Buffer &PixelKilnImpl::getBuffer(uint64_t buffer) {
@@ -191,7 +275,10 @@ PixelKilnImpl::Image &PixelKilnImpl::getImage(uint64_t image) {
 }
 
 vk::FormatFeatureFlags PixelKilnImpl::formatFeatures(ImageFormat format) {
-    return m_physicalDevice.getFormatProperties(toVkFormat(format)).optimalTilingFeatures;
+    if (static_cast<unsigned>(format) >= IMAGE_FORMAT_COUNT) {
+        throw std::invalid_argument("PixelKiln: invalid ImageFormat");
+    }
+    return m_formatFeatures[format];
 }
 
 uint64_t PixelKilnImpl::createBuffer(uint64_t size) {
@@ -220,6 +307,13 @@ void PixelKilnImpl::destroyBuffer(uint64_t buffer) {
     });
 }
 
+PixelKilnImpl::Ring &PixelKilnImpl::uploadRing() {
+    if (!m_uploadRing.staging.buffer) {
+        m_uploadRing.staging = createStagingBuffer(UPLOAD_RING_SIZE, false);
+    }
+    return m_uploadRing;
+}
+
 void PixelKilnImpl::uploadBuffer(uint64_t buffer, const void* data, uint64_t size, uint64_t offset) {
     collectGarbage();
     Buffer &target = getBuffer(buffer);
@@ -229,26 +323,22 @@ void PixelKilnImpl::uploadBuffer(uint64_t buffer, const void* data, uint64_t siz
     if (offset > target.size || size > target.size - offset) {
         throw std::invalid_argument("PixelKiln: uploadBuffer range is outside the buffer");
     }
-    StagingBuffer staging = createStagingBuffer(size, false);
-    std::memcpy(staging.mapped, data, size);
-    uint64_t value;
-    try {
+    Ring &ring = uploadRing();
+    // Each piece waits for the all queue to be done with the buffer (e.g. the call reading its previous contents).
+    const uint64_t waitAll = submittedValue(target.lastAllUse);
+    // Large uploads are staged a piece at a time, later pieces wait for ring space as earlier ones land.
+    for (uint64_t done = 0; done < size; done += UPLOAD_CHUNK_SIZE) {
+        const uint64_t chunk = std::min(UPLOAD_CHUNK_SIZE, size - done);
+        const uint64_t stagingOffset = allocateRing(ring, chunk, stagingAlignment(m_physicalDeviceProperties.limits));
+        std::memcpy(static_cast<char*>(ring.staging.mapped) + stagingOffset, static_cast<const char*>(data) + done,
+                    chunk);
         vk::CommandBuffer commandBuffer = beginCommands(QUEUE_TRANSFER);
         transferBarrier(commandBuffer);
-        vk::BufferCopy region{0, offset, size};
-        commandBuffer.copyBuffer(staging.buffer, target.buffer, region);
-        // Waits for the all queue to be done with the buffer (e.g. the call reading its previous contents).
-        value = submitCommands(QUEUE_TRANSFER, commandBuffer, target.lastAllUse);
-    } catch (...) {
-        destroyStagingBuffer(staging);
-        throw;
+        vk::BufferCopy region{stagingOffset, offset + done, chunk};
+        commandBuffer.copyBuffer(ring.staging.buffer, target.buffer, region);
+        target.lastTransferUse = submitCommands(QUEUE_TRANSFER, commandBuffer, waitAll);
+        ring.regions.push_back({stagingOffset, chunk, target.lastTransferUse});
     }
-    target.lastTransferUse = value;
-    vk::Device device = m_device;
-    deferDestroy(0, value, [device, staging]() {
-        device.destroyBuffer(staging.buffer);
-        device.freeMemory(staging.memory);
-    });
 }
 
 void PixelKilnImpl::downloadBuffer(uint64_t buffer, void* data, uint64_t size, uint64_t offset) {
@@ -260,23 +350,20 @@ void PixelKilnImpl::downloadBuffer(uint64_t buffer, void* data, uint64_t size, u
     if (offset > source.size || size > source.size - offset) {
         throw std::invalid_argument("PixelKiln: downloadBuffer range is outside the buffer");
     }
-    StagingBuffer staging = createStagingBuffer(size, true);
-    uint64_t value;
-    try {
+    reserveReadback(std::min(size, READBACK_MAX_SIZE));
+    const uint64_t waitAll = submittedValue(source.lastAllUse);
+    // Downloads larger than the readback buffer are read back a piece at a time.
+    for (uint64_t done = 0; done < size; done += m_readback.size) {
+        const uint64_t chunk = std::min(m_readback.size, size - done);
         vk::CommandBuffer commandBuffer = beginCommands(QUEUE_TRANSFER);
         transferBarrier(commandBuffer);
-        vk::BufferCopy region{offset, 0, size};
-        commandBuffer.copyBuffer(source.buffer, staging.buffer, region);
+        vk::BufferCopy region{offset + done, 0, chunk};
+        commandBuffer.copyBuffer(source.buffer, m_readback.buffer, region);
         hostBarrier(commandBuffer);
-        value = submitCommands(QUEUE_TRANSFER, commandBuffer, source.lastAllUse);
-    } catch (...) {
-        destroyStagingBuffer(staging);
-        throw;
+        source.lastTransferUse = submitCommands(QUEUE_TRANSFER, commandBuffer, waitAll);
+        waitValue(QUEUE_TRANSFER, source.lastTransferUse);
+        readStagingBuffer(m_readback, 0, static_cast<char*>(data) + done, chunk);
     }
-    source.lastTransferUse = value;
-    waitValue(QUEUE_TRANSFER, value);
-    readStagingBuffer(staging, data, size);
-    destroyStagingBuffer(staging);
 }
 
 uint64_t PixelKilnImpl::createImage(const ImageDesc &desc) {
@@ -299,9 +386,21 @@ uint64_t PixelKilnImpl::createImage(const ImageDesc &desc) {
     if (!depth && (desc.usage & IMAGE_USAGE_DEPTH_TARGET)) {
         throw std::invalid_argument("PixelKiln: IMAGE_USAGE_DEPTH_TARGET needs a depth format");
     }
+    const vk::SampleCountFlagBits samples = toVkSampleCount(desc.samples);
+    const bool multisampled = desc.samples > 1;
+    if (multisampled && (desc.usage & IMAGE_USAGE_STORAGE)) {
+        throw std::invalid_argument("PixelKiln: multisampled images can't be storage images");
+    }
+    if (multisampled && !(desc.usage & (IMAGE_USAGE_COLOR_TARGET | IMAGE_USAGE_DEPTH_TARGET))) {
+        throw std::invalid_argument("PixelKiln: multisampled images must be color or depth targets");
+    }
 
+    // Depth and multisampled images are never copied (uploads and downloads reject them), so only the all queue
+    // touches them: no transfer usage, and exclusive sharing, which keeps compression available on some GPUs.
+    const bool transferable = !depth && !multisampled;
     vk::Format format = toVkFormat(desc.format);
-    vk::ImageUsageFlags usage = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
+    vk::ImageUsageFlags usage;
+    if (transferable) usage |= vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
     if (desc.usage & IMAGE_USAGE_SAMPLED) usage |= vk::ImageUsageFlagBits::eSampled;
     if (desc.usage & IMAGE_USAGE_STORAGE) usage |= vk::ImageUsageFlagBits::eStorage;
     if (desc.usage & IMAGE_USAGE_COLOR_TARGET) usage |= vk::ImageUsageFlagBits::eColorAttachment;
@@ -317,6 +416,10 @@ uint64_t PixelKilnImpl::createImage(const ImageDesc &desc) {
     if (desc.width > formatProperties.maxExtent.width || desc.height > formatProperties.maxExtent.height) {
         throw std::invalid_argument("PixelKiln: image is larger than this device supports");
     }
+    if (!(formatProperties.sampleCounts & samples)) {
+        throw std::invalid_argument("PixelKiln: this device doesn't support that sample count for the image's format "
+                                    "and usage");
+    }
 
     Image image;
     image.desc = desc;
@@ -327,12 +430,14 @@ uint64_t PixelKilnImpl::createImage(const ImageDesc &desc) {
     imageInfo.extent = vk::Extent3D(desc.width, desc.height, 1);
     imageInfo.mipLevels = 1;
     imageInfo.arrayLayers = 1;
-    imageInfo.samples = vk::SampleCountFlagBits::e1;
+    imageInfo.samples = samples;
     imageInfo.tiling = vk::ImageTiling::eOptimal;
     imageInfo.usage = usage;
     imageInfo.initialLayout = vk::ImageLayout::eUndefined;
     uint32_t families[2];
-    applySharingMode(imageInfo, families);
+    if (transferable) {
+        applySharingMode(imageInfo, families);
+    }
     image.image = m_device.createImage(imageInfo);
     try {
         image.memory = allocateMemory(m_device.getImageMemoryRequirements(image.image), {},
@@ -352,6 +457,27 @@ uint64_t PixelKilnImpl::createImage(const ImageDesc &desc) {
     uint64_t handle = m_nextHandle++;
     m_images[handle] = image;
     return handle;
+}
+
+uint32_t PixelKilnImpl::getSupportedSampleCounts(ImageFormat format) {
+    if (format == IMAGE_FORMAT_UNDEFINED) {
+        throw std::invalid_argument("PixelKiln: image format can't be IMAGE_FORMAT_UNDEFINED");
+    }
+    const vk::PhysicalDeviceLimits &limits = m_physicalDeviceProperties.limits;
+    const bool depth = isDepthFormat(format);
+    const vk::ImageUsageFlags usage = depth ? vk::ImageUsageFlagBits::eDepthStencilAttachment
+                                            : vk::ImageUsageFlagBits::eColorAttachment;
+    vk::ImageFormatProperties properties;
+    try {
+        properties = m_physicalDevice.getImageFormatProperties(toVkFormat(format), vk::ImageType::e2D,
+                                                               vk::ImageTiling::eOptimal, usage);
+    } catch (const vk::FormatNotSupportedError &) {
+        return 0;
+    }
+    vk::SampleCountFlags framebuffer = depth ? limits.framebufferDepthSampleCounts
+                                     : isIntegerFormat(format) ? m_integerColorSampleCounts
+                                                               : limits.framebufferColorSampleCounts;
+    return static_cast<uint32_t>(properties.sampleCounts & framebuffer);
 }
 
 void PixelKilnImpl::destroyImage(uint64_t image) {
@@ -380,12 +506,26 @@ void PixelKilnImpl::uploadImage(uint64_t image, const void* data, uint64_t size)
     if (target.swapchain) {
         throw std::invalid_argument("PixelKiln: swapchain images can't be uploaded to");
     }
+    if (target.desc.samples > 1) {
+        throw std::invalid_argument("PixelKiln: multisampled images can't be uploaded");
+    }
     const uint64_t expectedSize = uint64_t(target.desc.width) * target.desc.height * texelSize(target.desc.format);
     if (!data || size != expectedSize) {
         throw std::invalid_argument("PixelKiln: uploadImage needs data of exactly width * height * texel size bytes");
     }
-    StagingBuffer staging = createStagingBuffer(size, false);
-    std::memcpy(staging.mapped, data, size);
+    // Small images go through the upload ring. Large ones (usually loaded once) get their own staging buffer.
+    const bool useRing = size <= UPLOAD_CHUNK_SIZE;
+    StagingBuffer staging;
+    uint64_t stagingOffset = 0;
+    if (useRing) {
+        Ring &ring = uploadRing();
+        stagingOffset = allocateRing(ring, size, stagingAlignment(m_physicalDeviceProperties.limits));
+        staging = ring.staging;
+    } else {
+        staging = createStagingBuffer(size, false);
+    }
+    std::memcpy(static_cast<char*>(staging.mapped) + stagingOffset, data, size);
+    const uint64_t waitAll = submittedValue(target.lastAllUse);
     uint64_t value;
     try {
         vk::CommandBuffer commandBuffer = beginCommands(QUEUE_TRANSFER);
@@ -393,21 +533,28 @@ void PixelKilnImpl::uploadImage(uint64_t image, const void* data, uint64_t size)
         transferImageBarrier(commandBuffer, target.image, target.aspect, vk::ImageLayout::eUndefined,
                              vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite);
         vk::BufferImageCopy region{};
+        region.bufferOffset = stagingOffset;
         region.imageSubresource = vk::ImageSubresourceLayers(target.aspect, 0, 0, 1);
         region.imageExtent = vk::Extent3D(target.desc.width, target.desc.height, 1);
         commandBuffer.copyBufferToImage(staging.buffer, target.image, vk::ImageLayout::eTransferDstOptimal, region);
-        value = submitCommands(QUEUE_TRANSFER, commandBuffer, target.lastAllUse);
+        value = submitCommands(QUEUE_TRANSFER, commandBuffer, waitAll);
     } catch (...) {
-        destroyStagingBuffer(staging);
+        if (!useRing) {
+            destroyStagingBuffer(staging);
+        }
         throw;
     }
     target.layout = vk::ImageLayout::eTransferDstOptimal;
     target.lastTransferUse = value;
-    vk::Device device = m_device;
-    deferDestroy(0, value, [device, staging]() {
-        device.destroyBuffer(staging.buffer);
-        device.freeMemory(staging.memory);
-    });
+    if (useRing) {
+        m_uploadRing.regions.push_back({stagingOffset, size, value});
+    } else {
+        vk::Device device = m_device;
+        deferDestroy(0, value, [device, staging]() {
+            device.destroyBuffer(staging.buffer);
+            device.freeMemory(staging.memory);
+        });
+    }
 }
 
 void PixelKilnImpl::downloadImage(uint64_t image, void* data, uint64_t size) {
@@ -415,6 +562,10 @@ void PixelKilnImpl::downloadImage(uint64_t image, void* data, uint64_t size) {
     Image &source = getImage(image);
     if (isDepthFormat(source.desc.format)) {
         throw std::invalid_argument("PixelKiln: depth images can't be downloaded");
+    }
+    if (source.desc.samples > 1) {
+        throw std::invalid_argument("PixelKiln: multisampled images can't be downloaded, resolve them into a single "
+                                    "sample image (ColorTarget::resolveImage)");
     }
     if (source.swapchain) {
         checkSwapchainImage(source);
@@ -430,10 +581,20 @@ void PixelKilnImpl::downloadImage(uint64_t image, void* data, uint64_t size) {
     if (!data || size != expectedSize) {
         throw std::invalid_argument("PixelKiln: downloadImage needs room for exactly width * height * texel size bytes");
     }
-    StagingBuffer staging = createStagingBuffer(size, true);
+    // Through the readback buffer, or a staging buffer of its own when larger than it may grow.
+    const bool useReadback = size <= READBACK_MAX_SIZE;
+    StagingBuffer staging;
+    if (useReadback) {
+        reserveReadback(size);
+        staging = m_readback;
+    } else {
+        staging = createStagingBuffer(size, true);
+    }
+    const uint64_t waitAll = submittedValue(source.lastAllUse);
     uint64_t value;
     try {
         vk::CommandBuffer commandBuffer = beginCommands(QUEUE_TRANSFER);
+        transferBarrier(commandBuffer); // after the previous download into the readback buffer
         transferImageBarrier(commandBuffer, source.image, source.aspect, source.layout,
                              vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead);
         vk::BufferImageCopy region{};
@@ -441,59 +602,19 @@ void PixelKilnImpl::downloadImage(uint64_t image, void* data, uint64_t size) {
         region.imageExtent = vk::Extent3D(source.desc.width, source.desc.height, 1);
         commandBuffer.copyImageToBuffer(source.image, vk::ImageLayout::eTransferSrcOptimal, staging.buffer, region);
         hostBarrier(commandBuffer);
-        value = submitCommands(QUEUE_TRANSFER, commandBuffer, source.lastAllUse);
+        value = submitCommands(QUEUE_TRANSFER, commandBuffer, waitAll);
     } catch (...) {
-        destroyStagingBuffer(staging);
+        if (!useReadback) {
+            destroyStagingBuffer(staging);
+        }
         throw;
     }
     source.layout = vk::ImageLayout::eTransferSrcOptimal;
     source.lastTransferUse = value;
     waitValue(QUEUE_TRANSFER, value);
-    readStagingBuffer(staging, data, size);
-    destroyStagingBuffer(staging);
-}
-
-void PixelKilnImpl::createUniformRing() {
-    m_uniformStaging = createStagingBuffer(UNIFORM_RING_SIZE, false);
-    m_uniformBuffer = createDeviceBuffer(UNIFORM_RING_SIZE, vk::BufferUsageFlagBits::eUniformBuffer |
-                                                            vk::BufferUsageFlagBits::eTransferDst);
-}
-
-void PixelKilnImpl::retireUniformRegions() {
-    if (m_uniformRegions.empty()) {
-        return;
-    }
-    uint64_t completed = completedValue(QUEUE_ALL);
-    while (!m_uniformRegions.empty() && m_uniformRegions.front().allValue <= completed) {
-        m_uniformReuseValue = std::max(m_uniformReuseValue, m_uniformRegions.front().allValue);
-        m_uniformRegions.pop_front();
-    }
-}
-
-uint64_t PixelKilnImpl::allocateUniforms(uint64_t size) {
-    if (size > UNIFORM_RING_SIZE) {
-        throw std::invalid_argument("PixelKiln: a call's uniform data is larger than the uniform ring");
-    }
-    const uint64_t alignment = m_physicalDeviceProperties.limits.minUniformBufferOffsetAlignment;
-    while (true) {
-        retireUniformRegions();
-        uint64_t offset = alignUp(m_uniformHead, alignment);
-        if (offset + size > UNIFORM_RING_SIZE) {
-            offset = 0;
-        }
-        bool overlaps = false;
-        for (const auto& region : m_uniformRegions) {
-            if (offset < region.offset + region.size && region.offset < offset + size) {
-                overlaps = true;
-                break;
-            }
-        }
-        if (!overlaps) {
-            m_uniformHead = offset + size;
-            return offset;
-        }
-        // The ring is full: wait for the oldest call still using it.
-        waitValue(QUEUE_ALL, m_uniformRegions.front().allValue);
+    readStagingBuffer(staging, 0, data, size);
+    if (!useReadback) {
+        destroyStagingBuffer(staging);
     }
 }
 

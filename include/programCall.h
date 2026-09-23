@@ -15,19 +15,26 @@ struct CallBinding {
     const void* data = nullptr; // BUFFER: uniform bytes, copied during call() so the caller may free them right after
     uint64_t size = 0;
     uint64_t resource = 0; // STORAGE_BUFFER: buffer handle. SAMPLER / STORAGE_IMAGE: image handle
-    SamplerDesc sampler; // SAMPLER only
+    SamplerDesc sampler{}; // SAMPLER only
 };
 
 struct ColorTarget {
     uint64_t image = 0;
     bool clear = true; // false keeps the existing contents
     float clearColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    // Multisampled targets only: a single sample image of the same size and format (e.g. a swapchain image) that
+    // receives the resolved result, the average of each pixel's samples, when the call ends. All of it is overwritten.
+    uint64_t resolveImage = 0;
+    // false: the image's contents aren't needed after the call and become undefined, which saves memory bandwidth.
+    // Typical for a multisampled target once it has been resolved.
+    bool store = true;
 };
 
 struct DepthTarget {
     uint64_t image = 0;
     bool clear = true;
     float clearDepth = 1.0f;
+    bool store = true; // false: the depth values aren't needed after the call (see ColorTarget::store)
 };
 
 struct ProgramCall {

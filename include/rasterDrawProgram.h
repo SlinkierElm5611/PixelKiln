@@ -25,6 +25,8 @@ struct RasterDrawProgram {
     ImageFormat depthFormat = IMAGE_FORMAT_UNDEFINED; // UNDEFINED means no depth target
     bool depthTest = true; // compare op LESS, only used when depthFormat is set
     bool depthWrite = true;
+    uint32_t samples = 1; // samples per pixel of every target (ImageDesc::samples), more than 1 for MSAA
+    bool alphaToCoverage = false; // the alpha of color output 0 decides how many samples a fragment covers
 };
 
 #endif //PIXELKILN_RASTERDRAWPROGRAM_H

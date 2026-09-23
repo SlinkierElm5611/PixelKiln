@@ -56,6 +56,20 @@ inline bool isDepthFormat(ImageFormat format)
     return format == IMAGE_FORMAT_D16_UNORM || format == IMAGE_FORMAT_D32_FLOAT;
 }
 
+inline bool isIntegerFormat(ImageFormat format)
+{
+    return format == IMAGE_FORMAT_R32_UINT;
+}
+
+// VkSampleCountFlagBits values are the counts themselves.
+inline vk::SampleCountFlagBits toVkSampleCount(uint32_t samples)
+{
+    if (samples == 0 || samples > 64 || (samples & (samples - 1)) != 0) {
+        throw std::invalid_argument("PixelKiln: a sample count must be 1, 2, 4, 8, 16, 32 or 64");
+    }
+    return static_cast<vk::SampleCountFlagBits>(samples);
+}
+
 inline uint32_t texelSize(ImageFormat format)
 {
     switch (format) {

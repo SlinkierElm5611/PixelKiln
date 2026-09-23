@@ -1,0 +1,23 @@
+#version 450
+
+// Counts the samples of each pixel of a multisampled image whose red channel is above 0.5.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2DMS source;
+layout(set = 0, binding = 1) writeonly buffer Output {
+    uint values[];
+} outputData;
+layout(set = 0, binding = 2) uniform Params {
+    uint width;
+    uint samples;
+} params;
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint covered = 0u;
+    for (int s = 0; s < int(params.samples); s++) {
+        covered += texelFetch(source, p, s).r > 0.5 ? 1u : 0u;
+    }
+    outputData.values[p.y * int(params.width) + p.x] = covered;
+}

@@ -2,8 +2,10 @@
 // Created by Stefan Balta on 2026-09-21.
 //
 
+#include <algorithm>
 #include <cstdint>
 #include <numeric>
+#include <random>
 #include <vector>
 
 #include "testFramework.h"
@@ -66,4 +68,47 @@ TEST(buffer_large)
     uint64_t buffer = kiln.createBuffer(size);
     kiln.uploadBuffer(buffer, values.data(), size);
     CHECK(download<uint8_t>(kiln, buffer, size) == values);
+}
+
+// Transfers larger than the staging rings go through them in pieces. Odd sizes and offsets put the piece boundaries
+// anywhere in the buffer.
+TEST(buffer_chunked_transfers)
+{
+    PixelKiln kiln;
+    const uint64_t size = 72ull * 1024 * 1024 + 12345;
+    const uint64_t offset = 4093;
+    std::vector<uint8_t> values(size);
+    for (uint64_t i = 0; i < size; i++) {
+        values[i] = uint8_t(i * 7 + (i >> 16));
+    }
+    uint64_t buffer = kiln.createBuffer(size + offset + 100);
+    kiln.uploadBuffer(buffer, values.data(), size, offset);
+    CHECK(download<uint8_t>(kiln, buffer, size, offset) == values);
+    // A range that straddles where the pieces of the full download were cut.
+    std::vector<uint8_t> middle = download<uint8_t>(kiln, buffer, 3 << 20, offset + (31ull << 20));
+    CHECK(std::equal(middle.begin(), middle.end(), values.begin() + (31ull << 20)));
+}
+
+// Random sizes (up to more than one staging piece) at random offsets, checked against a copy kept on the CPU. The
+// upload staging ring wraps around many times, and the uploads land in order.
+TEST(buffer_random_uploads)
+{
+    PixelKiln kiln;
+    const uint64_t size = 24ull * 1024 * 1024;
+    std::vector<uint8_t> mirror(size, 0);
+    uint64_t buffer = kiln.createBuffer(size);
+    kiln.uploadBuffer(buffer, mirror.data(), size);
+    std::mt19937_64 random(1234);
+    std::vector<uint8_t> data;
+    for (int i = 0; i < 300; i++) {
+        uint64_t length = 1 + random() % (i % 10 == 0 ? 6 << 20 : 64 << 10);
+        uint64_t offset = random() % (size - length + 1);
+        data.resize(length);
+        for (uint64_t j = 0; j < length; j++) {
+            data[j] = uint8_t(random());
+        }
+        kiln.uploadBuffer(buffer, data.data(), length, offset);
+        std::copy(data.begin(), data.end(), mirror.begin() + int64_t(offset));
+    }
+    CHECK(download<uint8_t>(kiln, buffer, size) == mirror);
 }

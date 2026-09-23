@@ -5,6 +5,7 @@
 // Misuse throws std::invalid_argument before any GPU work is recorded, and the kiln keeps working afterwards.
 
 #include <cstdint>
+#include <cstdio>
 #include <vector>
 
 #include "testFramework.h"
@@ -242,4 +243,89 @@ TEST(errors_swapchain_arguments)
     CHECK_THROWS_INVALID(kiln.getSwapchainInfo(999));
     CHECK_THROWS_INVALID(kiln.acquireSwapchainImage(999));
     CHECK_THROWS_INVALID(kiln.present(999));
+}
+
+TEST(errors_msaa)
+{
+    PixelKiln kiln;
+    CHECK_THROWS_INVALID(kiln.getSupportedSampleCounts(IMAGE_FORMAT_UNDEFINED));
+    CHECK_THROWS_INVALID(kiln.getSupportedSampleCounts(static_cast<ImageFormat>(99)));
+    CHECK(kiln.getSupportedSampleCounts(IMAGE_FORMAT_RGBA8_UNORM) & 1);
+    CHECK_THROWS_INVALID(kiln.createImage({8, 8, IMAGE_FORMAT_RGBA8_UNORM, IMAGE_USAGE_COLOR_TARGET, 0}));
+    CHECK_THROWS_INVALID(kiln.createImage({8, 8, IMAGE_FORMAT_RGBA8_UNORM, IMAGE_USAGE_COLOR_TARGET, 3}));
+    CHECK_THROWS_INVALID(kiln.createImage({8, 8, IMAGE_FORMAT_RGBA8_UNORM, IMAGE_USAGE_COLOR_TARGET, 128}));
+    RasterDrawProgram program{};
+    program.vertexShader = shaderFrom(positionVertSpirv);
+    program.fragmentShader = shaderFrom(solidFragSpirv);
+    program.uniformBindings = {UNIFORM_BINDING_TYPE_BUFFER};
+    program.vertexLayout.buffers = {{16}};
+    program.vertexLayout.attributes = {{0, 0, VERTEX_FORMAT_FLOAT4, 0}};
+    program.colorFormats = {IMAGE_FORMAT_RGBA8_UNORM};
+    program.depthFormat = IMAGE_FORMAT_D32_FLOAT;
+    program.samples = 3;
+    CHECK_THROWS_INVALID(kiln.loadRasterDrawProgram(program));
+    if (!(kiln.getSupportedSampleCounts(IMAGE_FORMAT_RGBA8_UNORM) & 64)) {
+        program.samples = 64;
+        CHECK_THROWS_INVALID(kiln.loadRasterDrawProgram(program));
+    }
+    const uint32_t counts = kiln.getSupportedSampleCounts(IMAGE_FORMAT_RGBA8_UNORM) &
+                            kiln.getSupportedSampleCounts(IMAGE_FORMAT_D32_FLOAT);
+    if (!(counts & 4)) {
+        std::printf("  skipped: no 4x multisampling\n");
+        return;
+    }
+    CHECK_THROWS_INVALID(kiln.createImage({8, 8, IMAGE_FORMAT_RGBA8_UNORM,
+                                           IMAGE_USAGE_COLOR_TARGET | IMAGE_USAGE_STORAGE, 4}));
+    CHECK_THROWS_INVALID(kiln.createImage({8, 8, IMAGE_FORMAT_RGBA8_UNORM, IMAGE_USAGE_SAMPLED, 4}));
+    program.samples = 4;
+    uint64_t msaa = kiln.loadRasterDrawProgram(program);
+    program.samples = 1;
+    uint64_t single = kiln.loadRasterDrawProgram(program);
+
+    const float positions[] = {-1.0f, -1.0f, 0.5f, 1.0f, 3.0f, -1.0f, 0.5f, 1.0f, -1.0f, 3.0f, 0.5f, 1.0f};
+    uint64_t triangle = kiln.createBuffer(sizeof(positions));
+    kiln.uploadBuffer(triangle, positions, sizeof(positions));
+    uint64_t color4 = kiln.createImage({16, 16, IMAGE_FORMAT_RGBA8_UNORM, IMAGE_USAGE_COLOR_TARGET, 4});
+    uint64_t depth4 = kiln.createImage({16, 16, IMAGE_FORMAT_D32_FLOAT, IMAGE_USAGE_DEPTH_TARGET, 4});
+    uint64_t color1 = kiln.createImage({16, 16, IMAGE_FORMAT_RGBA8_UNORM, IMAGE_USAGE_COLOR_TARGET});
+    uint64_t depth1 = kiln.createImage({16, 16, IMAGE_FORMAT_D32_FLOAT, IMAGE_USAGE_DEPTH_TARGET});
+    uint64_t otherFormat = kiln.createImage({16, 16, IMAGE_FORMAT_BGRA8_UNORM, IMAGE_USAGE_COLOR_TARGET});
+    uint64_t otherSize = kiln.createImage({8, 8, IMAGE_FORMAT_RGBA8_UNORM, IMAGE_USAGE_COLOR_TARGET});
+    uint64_t notTarget = kiln.createImage({16, 16, IMAGE_FORMAT_RGBA8_UNORM, IMAGE_USAGE_SAMPLED});
+    std::vector<uint8_t> pixels(16 * 16 * 4);
+    CHECK_THROWS_INVALID(kiln.uploadImage(color4, pixels.data(), pixels.size()));
+    CHECK_THROWS_INVALID(kiln.downloadImage(color4, pixels.data(), pixels.size()));
+
+    const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    ProgramCall call{};
+    call.type = PROGRAM_TYPE_RASTER_DRAW;
+    call.program = msaa;
+    call.bindings = {{.data = white, .size = sizeof(white)}};
+    call.colorTargets = {{.image = color4, .resolveImage = color1}};
+    call.depthTarget = {depth4};
+    call.vertexBuffers = {triangle};
+    call.vertexCount = 3;
+    auto broken = [&](auto change) {
+        ProgramCall copy = call;
+        change(copy);
+        return copy;
+    };
+    CHECK_THROWS_INVALID(kiln.call(broken([&](ProgramCall &c) { c.colorTargets[0] = {.image = color1}; })));
+    CHECK_THROWS_INVALID(kiln.call(broken([&](ProgramCall &c) { c.depthTarget.image = depth1; })));
+    CHECK_THROWS_INVALID(kiln.call(broken([&](ProgramCall &c) { c.program = single; })));
+    CHECK_THROWS_INVALID(kiln.call(broken([&](ProgramCall &c) { c.colorTargets[0].resolveImage = color4; })));
+    CHECK_THROWS_INVALID(kiln.call(broken([&](ProgramCall &c) { c.colorTargets[0].resolveImage = otherFormat; })));
+    CHECK_THROWS_INVALID(kiln.call(broken([&](ProgramCall &c) { c.colorTargets[0].resolveImage = otherSize; })));
+    CHECK_THROWS_INVALID(kiln.call(broken([&](ProgramCall &c) { c.colorTargets[0].resolveImage = notTarget; })));
+    CHECK_THROWS_INVALID(kiln.call(broken([&](ProgramCall &c) { c.colorTargets[0].resolveImage = 12345; })));
+    CHECK_THROWS_INVALID(kiln.call(broken([&](ProgramCall &c) {
+        c.program = single;
+        c.colorTargets[0] = {.image = color1, .resolveImage = otherFormat}; // nothing to resolve
+        c.depthTarget.image = depth1;
+    })));
+
+    // Still works.
+    kiln.call(call);
+    pixels = downloadPixels(kiln, color1, 16, 16);
+    CHECK_EQ(pixelAt(pixels, 16, 8, 8), packRgba(255, 255, 255, 255));
 }

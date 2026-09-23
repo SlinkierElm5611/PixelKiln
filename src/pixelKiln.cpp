@@ -41,6 +41,10 @@ void PixelKiln::destroyImage(uint64_t image) {
     m_impl->destroyImage(image);
 }
 
+uint32_t PixelKiln::getSupportedSampleCounts(ImageFormat format) {
+    return m_impl->getSupportedSampleCounts(format);
+}
+
 void PixelKiln::uploadImage(uint64_t image, const void* data, uint64_t size) {
     m_impl->uploadImage(image, data, size);
 }
@@ -51,6 +55,10 @@ void PixelKiln::downloadImage(uint64_t image, void* data, uint64_t size) {
 
 uint64_t PixelKiln::call(const ProgramCall &call) {
     return m_impl->call(call);
+}
+
+void PixelKiln::flush() {
+    m_impl->flush();
 }
 
 bool PixelKiln::isComplete(uint64_t ticket) {
