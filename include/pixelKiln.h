@@ -30,7 +30,7 @@ public:
     uint64_t loadRasterDrawProgram(const RasterDrawProgram &program);
     void unloadProgram(uint64_t program);
 
-    // Buffers can be used as vertex, index and storage buffers.
+    // Buffers can be used as vertex, index, storage and indirect buffers.
     uint64_t createBuffer(uint64_t size);
     void destroyBuffer(uint64_t buffer);
     // Copies data into staging before returning, the GPU copy runs asynchronously on the transfer queue. Uploads

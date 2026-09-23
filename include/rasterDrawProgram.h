@@ -17,6 +17,7 @@ struct RasterDrawProgram {
     Shader vertexShader;
     Shader fragmentShader;
     UniformBindings uniformBindings; // visible to the vertex and fragment stages
+    uint32_t pushConstantSize = 0; // bytes visible to the vertex and fragment stages as a push_constant block
     VertexLayout vertexLayout;
     PrimitiveTopology topology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     CullMode cullMode = CULL_MODE_NONE;

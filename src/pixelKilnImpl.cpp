@@ -226,6 +226,9 @@ void PixelKilnImpl::createDevice() {
     vk::PhysicalDeviceVulkan12Features features12{};
     features12.timelineSemaphore = VK_TRUE;
     features12.pNext = &features13;
+    // Only needed for a non-zero firstInstance in an indirect draw command; harmless (and usually available) otherwise.
+    vk::PhysicalDeviceFeatures enabledFeatures{};
+    enabledFeatures.drawIndirectFirstInstance = m_physicalDevice.getFeatures().drawIndirectFirstInstance;
 
     vk::DeviceCreateInfo deviceCreateInfo{};
     deviceCreateInfo.pNext = &features12;
@@ -233,6 +236,7 @@ void PixelKilnImpl::createDevice() {
     deviceCreateInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
     deviceCreateInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     deviceCreateInfo.ppEnabledExtensionNames = extensions.data();
+    deviceCreateInfo.pEnabledFeatures = &enabledFeatures;
     m_device = m_physicalDevice.createDevice(deviceCreateInfo);
     if (m_maxPushDescriptors > 0) {
         // Extension commands aren't exported by the loader.

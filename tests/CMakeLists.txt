@@ -38,7 +38,9 @@ pixelkiln_add_shaders(PixelKilnTests
     shaders/background.vert
     shaders/instanced.vert
     shaders/msaaCoverage.comp
-    shaders/uintValue.frag)
+    shaders/uintValue.frag
+    shaders/pushConstant.comp
+    shaders/pushConstantColor.frag)
 
 # Test names are the TEST(name) declarations at the start of a line. Editing a test source re-runs configure.
 function(pixelkiln_scan_tests outVariable)

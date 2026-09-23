@@ -24,6 +24,9 @@ static const uint32_t storeSpirv[] =
 static const uint32_t doubleSpirv[] =
 #include "double.comp.h"
 ;
+static const uint32_t pushConstantSpirv[] =
+#include "pushConstant.comp.h"
+;
 
 struct ScaleParams {
     float scale;
@@ -209,6 +212,71 @@ TEST(compute_uniform_data_copied_during_call)
     for (uint32_t i = 0; i < count; i++) {
         CHECK_EQ(values[i], 100 + i);
     }
+}
+
+// Same as compute_uniform_data_copied_during_call, but through a push constant block instead of a uniform buffer.
+TEST(compute_push_constants)
+{
+    PixelKiln kiln;
+    ComputeProgram program{};
+    program.computeShader = shaderFrom(pushConstantSpirv);
+    program.uniformBindings = {UNIFORM_BINDING_TYPE_STORAGE_BUFFER};
+    program.pushConstantSize = 2 * sizeof(uint32_t);
+    uint64_t loaded = kiln.loadComputeProgram(program);
+
+    const uint32_t count = 16;
+    uint64_t output = kiln.createBuffer(count * sizeof(uint32_t));
+    uint32_t pushConstants[2];
+    for (uint32_t i = 0; i < count; i++) {
+        pushConstants[0] = i;
+        pushConstants[1] = 100 + i;
+        ProgramCall call{};
+        call.type = PROGRAM_TYPE_COMPUTE;
+        call.program = loaded;
+        call.bindings = {{.resource = output}};
+        call.pushConstants = pushConstants;
+        kiln.call(call);
+        // The caller's push constant memory may be reused as soon as call() returns.
+        pushConstants[0] = 0xdeadbeef;
+        pushConstants[1] = 0xdeadbeef;
+    }
+    std::vector<uint32_t> values = download<uint32_t>(kiln, output, count);
+    for (uint32_t i = 0; i < count; i++) {
+        CHECK_EQ(values[i], 100 + i);
+    }
+}
+
+// The group count comes from a buffer (here just CPU-uploaded; a real user would have an earlier compute call write
+// it, e.g. after culling) instead of groupCountX/Y/Z.
+TEST(compute_indirect_dispatch)
+{
+    PixelKiln kiln;
+    uint64_t program = loadScale(kiln);
+    const uint32_t count = 256;
+    std::vector<float> input(count);
+    for (uint32_t i = 0; i < count; i++) {
+        input[i] = float(i);
+    }
+    uint64_t a = kiln.createBuffer(count * sizeof(float));
+    uint64_t b = kiln.createBuffer(count * sizeof(float));
+    kiln.uploadBuffer(a, input.data(), count * sizeof(float));
+
+    uint64_t indirect = kiln.createBuffer(sizeof(DispatchIndirectCommand));
+    const DispatchIndirectCommand command{count / 64, 1, 1};
+    kiln.uploadBuffer(indirect, &command, sizeof(command));
+
+    ScaleParams params{2.0f, 3.0f, count};
+    ProgramCall call = scaleCall(program, params, a, b);
+    call.groupCountX = 0; // ignored: the group count comes from the indirect buffer instead
+    call.dispatchIndirectBuffer = indirect;
+    kiln.call(call);
+
+    std::vector<float> output = download<float>(kiln, b, count);
+    int wrong = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        wrong += std::fabs(output[i] - (input[i] * 2.0f + 3.0f)) > 1e-4f;
+    }
+    CHECK_EQ(wrong, 0);
 }
 
 TEST(compute_tickets)

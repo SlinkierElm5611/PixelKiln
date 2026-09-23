@@ -9,5 +9,6 @@
 struct ComputeProgram {
     Shader computeShader;
     UniformBindings uniformBindings;
+    uint32_t pushConstantSize = 0; // bytes visible to the shader as a push_constant block, 0 for none
 };
 #endif //PIXELKILN_COMPUTEPROGRAM_H

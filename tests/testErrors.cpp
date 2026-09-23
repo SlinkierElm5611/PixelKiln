@@ -23,6 +23,9 @@ static const uint32_t solidFragSpirv[] =
 static const uint32_t readbackSpirv[] =
 #include "readback.comp.h"
 ;
+static const uint32_t pushConstantSpirv[] =
+#include "pushConstant.comp.h"
+;
 
 TEST(errors_resources)
 {
@@ -103,9 +106,16 @@ TEST(errors_programs)
     program.cullMode = static_cast<CullMode>(42);
     CHECK_THROWS_INVALID(kiln.loadRasterDrawProgram(program));
     program.cullMode = CULL_MODE_BACK;
+    program.pushConstantSize = UINT32_MAX;
+    CHECK_THROWS_INVALID(kiln.loadRasterDrawProgram(program));
+    program.pushConstantSize = 0;
     uint64_t draw = kiln.loadRasterDrawProgram(program);
     kiln.unloadProgram(draw);
     CHECK_THROWS_INVALID(kiln.unloadProgram(draw));
+
+    CHECK_THROWS_INVALID(kiln.loadComputeProgram({shaderFrom(storeSpirv),
+                                                  {UNIFORM_BINDING_TYPE_BUFFER, UNIFORM_BINDING_TYPE_STORAGE_BUFFER},
+                                                  UINT32_MAX}));
 }
 
 TEST(errors_compute_calls)
@@ -138,6 +148,23 @@ TEST(errors_compute_calls)
     CHECK_THROWS_INVALID(kiln.call(broken([](ProgramCall &c) { c.bindings[1].resource = 12345; })));
     CHECK_THROWS_INVALID(kiln.call(broken([&](ProgramCall &c) { c.bindings[1].resource = storageOnly; })));
     CHECK_THROWS_INVALID(kiln.call(broken([](ProgramCall &c) { c.groupCountX = UINT32_MAX; })));
+    CHECK_THROWS_INVALID(kiln.call(broken([](ProgramCall &c) { c.dispatchIndirectBuffer = 12345; })));
+
+    // A program with a push constant block needs call.pushConstants; the caller's memory may be reused right after.
+    ComputeProgram pushProgramDesc{};
+    pushProgramDesc.computeShader = shaderFrom(pushConstantSpirv);
+    pushProgramDesc.uniformBindings = {UNIFORM_BINDING_TYPE_STORAGE_BUFFER};
+    pushProgramDesc.pushConstantSize = 2 * sizeof(uint32_t);
+    uint64_t pushProgram = kiln.loadComputeProgram(pushProgramDesc);
+    ProgramCall pushCall{};
+    pushCall.type = PROGRAM_TYPE_COMPUTE;
+    pushCall.program = pushProgram;
+    pushCall.bindings = {{.resource = output}};
+    CHECK_THROWS_INVALID(kiln.call(pushCall));
+    const uint32_t pushConstants[2] = {0, 7};
+    pushCall.pushConstants = pushConstants;
+    kiln.call(pushCall);
+    CHECK_EQ(download<uint32_t>(kiln, output, 1)[0], 7u);
 
     // Sampling an image that wasn't created with IMAGE_USAGE_SAMPLED, or with an invalid sampler.
     uint32_t width = 8;
@@ -211,6 +238,7 @@ TEST(errors_raster_calls)
         c.indexType = static_cast<IndexType>(7);
         c.indexBuffer = triangle;
     })));
+    CHECK_THROWS_INVALID(kiln.call(broken([](ProgramCall &c) { c.drawIndirectBuffer = 12345; })));
 
     // Still works.
     kiln.call(call);
