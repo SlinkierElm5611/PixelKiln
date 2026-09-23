@@ -51,7 +51,12 @@ void PixelKilnImpl::createInstance()
         }
         m_surfaceSupport = true;
     }
-    bool debugUtils = false;
+    // Object naming and command buffer labels (setDebugName/beginDebugLabel/endDebugLabel) are useful with any
+    // graphics debugger attached, not just under the validation layer, so this is enabled independently of it.
+    m_debugUtilsSupport = hasExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    if (m_debugUtilsSupport) {
+        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    }
     if (m_config.enableValidation) {
         std::vector<vk::LayerProperties> availableLayers = vk::enumerateInstanceLayerProperties();
         bool hasValidation = std::any_of(availableLayers.begin(), availableLayers.end(), [](const vk::LayerProperties &l) {
@@ -62,10 +67,6 @@ void PixelKilnImpl::createInstance()
         } else {
             std::fprintf(stderr, "PixelKiln: validation requested but VK_LAYER_KHRONOS_validation is not installed\n");
         }
-        if (hasExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
-            extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-            debugUtils = true;
-        }
     }
     createInfo.pApplicationInfo = &appInfo;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
@@ -74,7 +75,18 @@ void PixelKilnImpl::createInstance()
     createInfo.ppEnabledLayerNames = layers.data();
     m_instance = vk::createInstance(createInfo);
 
-    if (debugUtils) {
+    if (m_debugUtilsSupport) {
+        m_setDebugUtilsObjectName = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
+            m_instance.getProcAddr("vkSetDebugUtilsObjectNameEXT"));
+        m_cmdBeginDebugUtilsLabel = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
+            m_instance.getProcAddr("vkCmdBeginDebugUtilsLabelEXT"));
+        m_cmdEndDebugUtilsLabel = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
+            m_instance.getProcAddr("vkCmdEndDebugUtilsLabelEXT"));
+        if (!m_setDebugUtilsObjectName || !m_cmdBeginDebugUtilsLabel || !m_cmdEndDebugUtilsLabel) {
+            m_debugUtilsSupport = false; // the loader claims the extension but doesn't actually export its commands
+        }
+    }
+    if (m_config.enableValidation && m_debugUtilsSupport) {
         auto create = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
             m_instance.getProcAddr("vkCreateDebugUtilsMessengerEXT"));
         if (create) {
@@ -89,6 +101,29 @@ void PixelKilnImpl::createInstance()
             create(m_instance, &messengerInfo, nullptr, &m_debugMessenger);
         }
     }
+}
+
+void PixelKilnImpl::setDebugName(vk::ObjectType type, uint64_t handle, const char* name) {
+    if (!m_setDebugUtilsObjectName || !name) {
+        return;
+    }
+    VkDebugUtilsObjectNameInfoEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+    info.objectType = static_cast<VkObjectType>(type);
+    info.objectHandle = handle;
+    info.pObjectName = name;
+    m_setDebugUtilsObjectName(m_device, &info);
+}
+
+void PixelKilnImpl::beginDebugLabel(vk::CommandBuffer commandBuffer, const char* label) {
+    VkDebugUtilsLabelEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+    info.pLabelName = label;
+    m_cmdBeginDebugUtilsLabel(commandBuffer, &info);
+}
+
+void PixelKilnImpl::endDebugLabel(vk::CommandBuffer commandBuffer) {
+    m_cmdEndDebugUtilsLabel(commandBuffer);
 }
 
 void PixelKilnImpl::selectPhysicalDevice() {

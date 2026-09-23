@@ -55,7 +55,7 @@ vk::ShaderModule PixelKilnImpl::createShaderModule(const Shader &shader) {
     return m_device.createShaderModule(shaderModuleCreateInfo);
 }
 
-uint64_t PixelKilnImpl::loadComputeProgram(const ComputeProgram &program) {
+uint64_t PixelKilnImpl::loadComputeProgram(const ComputeProgram &program, const char* debugName) {
     collectGarbage();
     if (program.pushConstantSize > m_physicalDeviceProperties.limits.maxPushConstantsSize) {
         throw std::invalid_argument("PixelKiln: push constant size is too large for this device");
@@ -95,12 +95,13 @@ uint64_t PixelKilnImpl::loadComputeProgram(const ComputeProgram &program) {
         throw;
     }
     m_device.destroyShaderModule(shaderModule);
+    setDebugName(vk::ObjectType::ePipeline, reinterpret_cast<uint64_t>(static_cast<VkPipeline>(loaded.pipeline)), debugName);
     uint64_t handle = m_nextHandle++;
     m_programs[handle] = loaded;
     return handle;
 }
 
-uint64_t PixelKilnImpl::loadRasterDrawProgram(const RasterDrawProgram &program) {
+uint64_t PixelKilnImpl::loadRasterDrawProgram(const RasterDrawProgram &program, const char* debugName) {
     collectGarbage();
     const vk::PhysicalDeviceLimits &limits = m_physicalDeviceProperties.limits;
     if (program.colorFormats.empty() && program.depthFormat == IMAGE_FORMAT_UNDEFINED) {
@@ -298,6 +299,7 @@ uint64_t PixelKilnImpl::loadRasterDrawProgram(const RasterDrawProgram &program) 
     }
     m_device.destroyShaderModule(vertexModule);
     m_device.destroyShaderModule(fragmentModule);
+    setDebugName(vk::ObjectType::ePipeline, reinterpret_cast<uint64_t>(static_cast<VkPipeline>(loaded.pipeline)), debugName);
     uint64_t handle = m_nextHandle++;
     m_programs[handle] = loaded;
     return handle;

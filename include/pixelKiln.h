@@ -26,12 +26,14 @@ class PixelKiln
 private:
     std::unique_ptr<PixelKilnImpl> m_impl;
 public:
-    uint64_t loadComputeProgram(const ComputeProgram &program);
-    uint64_t loadRasterDrawProgram(const RasterDrawProgram &program);
+    // debugName, where offered below, is an optional label for the created object visible in graphics debuggers
+    // (RenderDoc, Nsight) via VK_EXT_debug_utils; ignored (no cost) if the extension isn't available.
+    uint64_t loadComputeProgram(const ComputeProgram &program, const char* debugName = nullptr);
+    uint64_t loadRasterDrawProgram(const RasterDrawProgram &program, const char* debugName = nullptr);
     void unloadProgram(uint64_t program);
 
     // Buffers can be used as vertex, index, storage and indirect buffers.
-    uint64_t createBuffer(uint64_t size);
+    uint64_t createBuffer(uint64_t size, const char* debugName = nullptr);
     void destroyBuffer(uint64_t buffer);
     // Copies data into staging before returning, the GPU copy runs asynchronously on the transfer queue. Uploads
     // larger than 4 MiB are staged in pieces, so they may wait for the first pieces to be copied.
@@ -39,7 +41,7 @@ public:
     // Blocks until every earlier GPU use of the buffer is done and the data is in `data`.
     void downloadBuffer(uint64_t buffer, void* data, uint64_t size, uint64_t offset = 0);
 
-    uint64_t createImage(const ImageDesc &desc);
+    uint64_t createImage(const ImageDesc &desc, const char* debugName = nullptr);
     void destroyImage(uint64_t image);
     // The sample counts a render target of this format supports, as a bitmask of the counts themselves: 4x MSAA works
     // when getSupportedSampleCounts(format) & 4. 0 when the format can't be rendered to at all.

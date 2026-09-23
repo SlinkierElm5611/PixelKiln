@@ -181,6 +181,10 @@ private:
     bool m_swapchainSupport = false; // VK_KHR_swapchain enabled on the device
     uint32_t m_maxPushDescriptors = 0; // 0 without VK_KHR_push_descriptor
     PFN_vkCmdPushDescriptorSetKHR m_cmdPushDescriptorSet = nullptr;
+    bool m_debugUtilsSupport = false; // VK_EXT_debug_utils enabled on the instance, independent of enableValidation
+    PFN_vkSetDebugUtilsObjectNameEXT m_setDebugUtilsObjectName = nullptr;
+    PFN_vkCmdBeginDebugUtilsLabelEXT m_cmdBeginDebugUtilsLabel = nullptr;
+    PFN_vkCmdEndDebugUtilsLabelEXT m_cmdEndDebugUtilsLabel = nullptr;
     std::vector<PendingDestroy> m_pendingDestroys;
 
     // pixelKilnImpl.cpp
@@ -210,6 +214,11 @@ private:
     void flushBatch(vk::Semaphore binarySignal = {});
     void deferDestroy(uint64_t allValue, uint64_t transferValue, std::function<void()> destroy);
     void collectGarbage();
+    // Diagnostic only, both no-ops when VK_EXT_debug_utils isn't available or name/label is null. Visible in graphics
+    // debuggers (RenderDoc, Nsight) attached to the process, no effect otherwise.
+    void setDebugName(vk::ObjectType type, uint64_t handle, const char* name);
+    void beginDebugLabel(vk::CommandBuffer commandBuffer, const char* label);
+    void endDebugLabel(vk::CommandBuffer commandBuffer);
 
     // pixelKilnImplResources.cpp
     void applySharingMode(vk::BufferCreateInfo &info, uint32_t* families);
@@ -259,16 +268,16 @@ private:
     vk::ShaderModule createShaderModule(const Shader &shader);
 
 public:
-    uint64_t loadComputeProgram(const ComputeProgram &program);
-    uint64_t loadRasterDrawProgram(const RasterDrawProgram &program);
+    uint64_t loadComputeProgram(const ComputeProgram &program, const char* debugName = nullptr);
+    uint64_t loadRasterDrawProgram(const RasterDrawProgram &program, const char* debugName = nullptr);
     void unloadProgram(uint64_t program);
 
-    uint64_t createBuffer(uint64_t size);
+    uint64_t createBuffer(uint64_t size, const char* debugName = nullptr);
     void destroyBuffer(uint64_t buffer);
     void uploadBuffer(uint64_t buffer, const void* data, uint64_t size, uint64_t offset);
     void downloadBuffer(uint64_t buffer, void* data, uint64_t size, uint64_t offset);
 
-    uint64_t createImage(const ImageDesc &desc);
+    uint64_t createImage(const ImageDesc &desc, const char* debugName = nullptr);
     void destroyImage(uint64_t image);
     uint32_t getSupportedSampleCounts(ImageFormat format);
     void uploadImage(uint64_t image, const void* data, uint64_t size);

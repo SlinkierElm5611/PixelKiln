@@ -5,20 +5,20 @@
 #include "pixelKiln.h"
 #include "pixelKilnImpl.h"
 
-uint64_t PixelKiln::loadComputeProgram(const ComputeProgram &program) {
-    return m_impl->loadComputeProgram(program);
+uint64_t PixelKiln::loadComputeProgram(const ComputeProgram &program, const char* debugName) {
+    return m_impl->loadComputeProgram(program, debugName);
 }
 
-uint64_t PixelKiln::loadRasterDrawProgram(const RasterDrawProgram &program) {
-    return m_impl->loadRasterDrawProgram(program);
+uint64_t PixelKiln::loadRasterDrawProgram(const RasterDrawProgram &program, const char* debugName) {
+    return m_impl->loadRasterDrawProgram(program, debugName);
 }
 
 void PixelKiln::unloadProgram(uint64_t program) {
     m_impl->unloadProgram(program);
 }
 
-uint64_t PixelKiln::createBuffer(uint64_t size) {
-    return m_impl->createBuffer(size);
+uint64_t PixelKiln::createBuffer(uint64_t size, const char* debugName) {
+    return m_impl->createBuffer(size, debugName);
 }
 
 void PixelKiln::destroyBuffer(uint64_t buffer) {
@@ -33,8 +33,8 @@ void PixelKiln::downloadBuffer(uint64_t buffer, void* data, uint64_t size, uint6
     m_impl->downloadBuffer(buffer, data, size, offset);
 }
 
-uint64_t PixelKiln::createImage(const ImageDesc &desc) {
-    return m_impl->createImage(desc);
+uint64_t PixelKiln::createImage(const ImageDesc &desc, const char* debugName) {
+    return m_impl->createImage(desc, debugName);
 }
 
 void PixelKiln::destroyImage(uint64_t image) {

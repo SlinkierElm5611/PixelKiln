@@ -265,6 +265,12 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
     // Step 3: record the program into the open batch.
     vk::CommandBuffer commandBuffer = batchCommands();
 
+    // Visible in graphics debuggers (RenderDoc, Nsight) as a named region around this call's recorded commands.
+    const bool hasDebugLabel = m_debugUtilsSupport && call.debugLabel;
+    if (hasDebugLabel) {
+        beginDebugLabel(commandBuffer, call.debugLabel);
+    }
+
     // Orders this call after everything earlier on the all queue (e.g. a compute writing a storage buffer that this
     // draw reads as vertices) and moves images into the layouts this call needs.
     vk::MemoryBarrier2 memoryBarrier{};
@@ -381,6 +387,10 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
             commandBuffer.draw(call.vertexCount, call.instanceCount, 0, 0);
         }
         commandBuffer.endRendering();
+    }
+
+    if (hasDebugLabel) {
+        endDebugLabel(commandBuffer);
     }
 
     // The batch waits for any pending upload into a resource this call uses.

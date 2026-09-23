@@ -246,7 +246,7 @@ vk::FormatFeatureFlags PixelKilnImpl::formatFeatures(ImageFormat format) {
     return m_formatFeatures[format];
 }
 
-uint64_t PixelKilnImpl::createBuffer(uint64_t size) {
+uint64_t PixelKilnImpl::createBuffer(uint64_t size, const char* debugName) {
     collectGarbage();
     if (size == 0) {
         throw std::invalid_argument("PixelKiln: buffer size must be greater than 0");
@@ -257,6 +257,7 @@ uint64_t PixelKilnImpl::createBuffer(uint64_t size) {
                                              vk::BufferUsageFlagBits::eIndirectBuffer |
                                              vk::BufferUsageFlagBits::eTransferSrc |
                                              vk::BufferUsageFlagBits::eTransferDst);
+    setDebugName(vk::ObjectType::eBuffer, reinterpret_cast<uint64_t>(static_cast<VkBuffer>(buffer.buffer)), debugName);
     uint64_t handle = m_nextHandle++;
     m_buffers[handle] = buffer;
     return handle;
@@ -331,7 +332,7 @@ void PixelKilnImpl::downloadBuffer(uint64_t buffer, void* data, uint64_t size, u
     }
 }
 
-uint64_t PixelKilnImpl::createImage(const ImageDesc &desc) {
+uint64_t PixelKilnImpl::createImage(const ImageDesc &desc, const char* debugName) {
     collectGarbage();
     if (desc.width == 0 || desc.height == 0) {
         throw std::invalid_argument("PixelKiln: image width and height must be greater than 0");
@@ -424,6 +425,8 @@ uint64_t PixelKilnImpl::createImage(const ImageDesc &desc) {
         vmaDestroyImage(m_allocator, image.image, image.allocation);
         throw;
     }
+    setDebugName(vk::ObjectType::eImage, reinterpret_cast<uint64_t>(static_cast<VkImage>(image.image)), debugName);
+    setDebugName(vk::ObjectType::eImageView, reinterpret_cast<uint64_t>(static_cast<VkImageView>(image.view)), debugName);
     uint64_t handle = m_nextHandle++;
     m_images[handle] = image;
     return handle;

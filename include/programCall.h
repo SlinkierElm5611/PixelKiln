@@ -67,6 +67,10 @@ struct ProgramCall {
     // Bytes copied into the program's push_constant block, sized by its pushConstantSize. Required (non-null) if and
     // only if the program declares a pushConstantSize greater than 0.
     const void* pushConstants = nullptr;
+    // Optional name for this call's recorded commands, visible in graphics debuggers (RenderDoc, Nsight) attached to
+    // the process via VK_EXT_debug_utils. Ignored (no cost) if the extension isn't available. Only read during
+    // call(), never retained.
+    const char* debugLabel = nullptr;
 
     // PROGRAM_TYPE_COMPUTE
     uint32_t groupCountX = 1; // ignored when dispatchIndirectBuffer is set
