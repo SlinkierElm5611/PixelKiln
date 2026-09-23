@@ -254,6 +254,7 @@ uint64_t PixelKilnImpl::createBuffer(uint64_t size) {
     Buffer buffer = createDeviceBuffer(size, vk::BufferUsageFlagBits::eVertexBuffer |
                                              vk::BufferUsageFlagBits::eIndexBuffer |
                                              vk::BufferUsageFlagBits::eStorageBuffer |
+                                             vk::BufferUsageFlagBits::eIndirectBuffer |
                                              vk::BufferUsageFlagBits::eTransferSrc |
                                              vk::BufferUsageFlagBits::eTransferDst);
     uint64_t handle = m_nextHandle++;

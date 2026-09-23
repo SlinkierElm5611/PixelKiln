@@ -59,6 +59,8 @@ private:
         vk::DescriptorSetLayout setLayout;
         bool pushDescriptors = false; // descriptors are pushed into the command buffer instead of allocated
         UniformBindings bindings;
+        uint32_t pushConstantSize = 0;
+        vk::ShaderStageFlags pushConstantStages;
         std::vector<ImageFormat> colorFormats;
         ImageFormat depthFormat = IMAGE_FORMAT_UNDEFINED;
         uint32_t samples = 1;

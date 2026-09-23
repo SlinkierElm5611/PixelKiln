@@ -57,16 +57,26 @@ vk::ShaderModule PixelKilnImpl::createShaderModule(const Shader &shader) {
 
 uint64_t PixelKilnImpl::loadComputeProgram(const ComputeProgram &program) {
     collectGarbage();
+    if (program.pushConstantSize > m_physicalDeviceProperties.limits.maxPushConstantsSize) {
+        throw std::invalid_argument("PixelKiln: push constant size is too large for this device");
+    }
     Program loaded;
     loaded.type = PROGRAM_TYPE_COMPUTE;
     loaded.bindings = program.uniformBindings;
+    loaded.pushConstantSize = program.pushConstantSize;
+    loaded.pushConstantStages = vk::ShaderStageFlagBits::eCompute;
     vk::ShaderModule shaderModule = createShaderModule(program.computeShader);
     try {
         loaded.setLayout = createSetLayout(program.uniformBindings, vk::ShaderStageFlagBits::eCompute,
                                            loaded.pushDescriptors);
+        vk::PushConstantRange pushConstantRange{loaded.pushConstantStages, 0, loaded.pushConstantSize};
         vk::PipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.setLayoutCount = 1;
         layoutInfo.pSetLayouts = &loaded.setLayout;
+        if (loaded.pushConstantSize > 0) {
+            layoutInfo.pushConstantRangeCount = 1;
+            layoutInfo.pPushConstantRanges = &pushConstantRange;
+        }
         loaded.pipelineLayout = m_device.createPipelineLayout(layoutInfo);
 
         vk::PipelineShaderStageCreateInfo shaderStageCreateInfo{};
@@ -95,6 +105,9 @@ uint64_t PixelKilnImpl::loadRasterDrawProgram(const RasterDrawProgram &program) 
     const vk::PhysicalDeviceLimits &limits = m_physicalDeviceProperties.limits;
     if (program.colorFormats.empty() && program.depthFormat == IMAGE_FORMAT_UNDEFINED) {
         throw std::invalid_argument("PixelKiln: a raster draw program needs at least one color or depth target");
+    }
+    if (program.pushConstantSize > limits.maxPushConstantsSize) {
+        throw std::invalid_argument("PixelKiln: push constant size is too large for this device");
     }
     if (program.colorFormats.size() > limits.maxColorAttachments) {
         throw std::invalid_argument("PixelKiln: too many color targets for this device");
@@ -179,6 +192,8 @@ uint64_t PixelKilnImpl::loadRasterDrawProgram(const RasterDrawProgram &program) 
     loaded.depthFormat = program.depthFormat;
     loaded.samples = program.samples;
     loaded.vertexBufferCount = static_cast<uint32_t>(vertexLayout.buffers.size());
+    loaded.pushConstantSize = program.pushConstantSize;
+    loaded.pushConstantStages = vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment;
 
     vk::ShaderModule vertexModule = createShaderModule(program.vertexShader);
     vk::ShaderModule fragmentModule;
@@ -187,9 +202,14 @@ uint64_t PixelKilnImpl::loadRasterDrawProgram(const RasterDrawProgram &program) 
         loaded.setLayout = createSetLayout(program.uniformBindings,
                                            vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
                                            loaded.pushDescriptors);
+        vk::PushConstantRange pushConstantRange{loaded.pushConstantStages, 0, loaded.pushConstantSize};
         vk::PipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.setLayoutCount = 1;
         layoutInfo.pSetLayouts = &loaded.setLayout;
+        if (loaded.pushConstantSize > 0) {
+            layoutInfo.pushConstantRangeCount = 1;
+            layoutInfo.pPushConstantRanges = &pushConstantRange;
+        }
         loaded.pipelineLayout = m_device.createPipelineLayout(layoutInfo);
 
         vk::PipelineShaderStageCreateInfo stages[2]{};

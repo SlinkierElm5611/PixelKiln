@@ -20,6 +20,9 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
     if (call.bindings.size() != program.bindings.size()) {
         throw std::invalid_argument("PixelKiln: a call needs one binding per program uniform binding");
     }
+    if (program.pushConstantSize > 0 && !call.pushConstants) {
+        throw std::invalid_argument("PixelKiln: this program needs push constant data");
+    }
     const vk::PhysicalDeviceLimits &limits = m_physicalDeviceProperties.limits;
 
     // Validate everything before anything is allocated or recorded.
@@ -161,10 +164,15 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
             toVkIndexType(call.indexType);
             usedBuffers.push_back(&getBuffer(call.indexBuffer));
         }
+        if (call.drawIndirectBuffer) {
+            usedBuffers.push_back(&getBuffer(call.drawIndirectBuffer));
+        }
     } else {
-        if (call.groupCountX > limits.maxComputeWorkGroupCount[0] ||
-            call.groupCountY > limits.maxComputeWorkGroupCount[1] ||
-            call.groupCountZ > limits.maxComputeWorkGroupCount[2]) {
+        if (call.dispatchIndirectBuffer) {
+            usedBuffers.push_back(&getBuffer(call.dispatchIndirectBuffer));
+        } else if (call.groupCountX > limits.maxComputeWorkGroupCount[0] ||
+                  call.groupCountY > limits.maxComputeWorkGroupCount[1] ||
+                  call.groupCountZ > limits.maxComputeWorkGroupCount[2]) {
             throw std::invalid_argument("PixelKiln: group count exceeds this device's maxComputeWorkGroupCount");
         }
     }
@@ -294,7 +302,16 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
     if (program.type == PROGRAM_TYPE_COMPUTE) {
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, program.pipeline);
         bindDescriptors(commandBuffer, vk::PipelineBindPoint::eCompute);
-        commandBuffer.dispatch(call.groupCountX, call.groupCountY, call.groupCountZ);
+        if (program.pushConstantSize > 0) {
+            commandBuffer.pushConstants(program.pipelineLayout, program.pushConstantStages, 0,
+                                        program.pushConstantSize, call.pushConstants);
+        }
+        if (call.dispatchIndirectBuffer) {
+            commandBuffer.dispatchIndirect(m_buffers.at(call.dispatchIndirectBuffer).buffer,
+                                           call.dispatchIndirectOffset);
+        } else {
+            commandBuffer.dispatch(call.groupCountX, call.groupCountY, call.groupCountZ);
+        }
     } else {
         std::vector<vk::RenderingAttachmentInfo> colorAttachments;
         for (size_t i = 0; i < call.colorTargets.size(); i++) {
@@ -337,6 +354,10 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
         commandBuffer.setViewport(0, vk::Viewport(0.0f, 0.0f, float(extent.width), float(extent.height), 0.0f, 1.0f));
         commandBuffer.setScissor(0, vk::Rect2D({0, 0}, extent));
         bindDescriptors(commandBuffer, vk::PipelineBindPoint::eGraphics);
+        if (program.pushConstantSize > 0) {
+            commandBuffer.pushConstants(program.pipelineLayout, program.pushConstantStages, 0,
+                                        program.pushConstantSize, call.pushConstants);
+        }
         if (!call.vertexBuffers.empty()) {
             std::vector<vk::Buffer> vertexBuffers;
             for (uint64_t vertexBuffer : call.vertexBuffers) {
@@ -347,7 +368,15 @@ uint64_t PixelKilnImpl::call(const ProgramCall &call) {
         }
         if (call.indexType != INDEX_TYPE_NONE) {
             commandBuffer.bindIndexBuffer(m_buffers.at(call.indexBuffer).buffer, 0, toVkIndexType(call.indexType));
-            commandBuffer.drawIndexed(call.indexCount, call.instanceCount, 0, 0, 0);
+            if (call.drawIndirectBuffer) {
+                commandBuffer.drawIndexedIndirect(m_buffers.at(call.drawIndirectBuffer).buffer,
+                                                  call.drawIndirectOffset, 1, sizeof(VkDrawIndexedIndirectCommand));
+            } else {
+                commandBuffer.drawIndexed(call.indexCount, call.instanceCount, 0, 0, 0);
+            }
+        } else if (call.drawIndirectBuffer) {
+            commandBuffer.drawIndirect(m_buffers.at(call.drawIndirectBuffer).buffer, call.drawIndirectOffset, 1,
+                                       sizeof(VkDrawIndirectCommand));
         } else {
             commandBuffer.draw(call.vertexCount, call.instanceCount, 0, 0);
         }

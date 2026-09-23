@@ -29,6 +29,9 @@ static const uint32_t backgroundVertSpirv[] =
 static const uint32_t instancedVertSpirv[] =
 #include "instanced.vert.h"
 ;
+static const uint32_t pushConstantColorFragSpirv[] =
+#include "pushConstantColor.frag.h"
+;
 static const uint32_t triangleSpirv[] =
 #include "triangle.comp.h"
 ;
@@ -188,6 +191,105 @@ TEST(raster_blending)
 
     std::vector<uint8_t> pixels = downloadPixels(kiln, color, SIZE, SIZE);
     CHECK(nearRgba(pixelAt(pixels, SIZE, 32, 32), packRgba(128, 0, 128, 255)));
+}
+
+// position.vert + pushConstantColor.frag: same triangle as raster_blending, color from a push constant instead of a
+// uniform buffer binding.
+TEST(raster_push_constants)
+{
+    PixelKiln kiln;
+    RasterDrawProgram program{};
+    program.vertexShader = shaderFrom(positionVertSpirv);
+    program.fragmentShader = shaderFrom(pushConstantColorFragSpirv);
+    program.pushConstantSize = 4 * sizeof(float);
+    program.vertexLayout.buffers = {{4 * sizeof(float)}};
+    program.vertexLayout.attributes = {{0, 0, VERTEX_FORMAT_FLOAT4, 0}};
+    program.colorFormats = {IMAGE_FORMAT_RGBA8_UNORM};
+    uint64_t draw = kiln.loadRasterDrawProgram(program);
+    uint64_t triangle = fullScreenTriangle(kiln);
+    uint64_t color = colorTarget(kiln);
+
+    const float orange[4] = {1.0f, 0.5f, 0.0f, 1.0f};
+    ProgramCall call{};
+    call.type = PROGRAM_TYPE_RASTER_DRAW;
+    call.program = draw;
+    call.pushConstants = orange;
+    call.colorTargets = {{color, true, {0.0f, 0.0f, 0.0f, 1.0f}}};
+    call.vertexBuffers = {triangle};
+    call.vertexCount = 3;
+    kiln.call(call);
+
+    std::vector<uint8_t> pixels = downloadPixels(kiln, color, SIZE, SIZE);
+    CHECK(nearRgba(pixelAt(pixels, SIZE, 32, 32), packRgba(255, 128, 0, 255)));
+}
+
+// Same triangle as raster_blending, drawn with vkCmdDrawIndirect: the draw parameters come from a buffer instead of
+// vertexCount/instanceCount.
+TEST(raster_indirect_draw)
+{
+    PixelKiln kiln;
+    RasterDrawProgram program = solidProgram({IMAGE_FORMAT_RGBA8_UNORM});
+    uint64_t draw = kiln.loadRasterDrawProgram(program);
+    uint64_t triangle = fullScreenTriangle(kiln);
+    uint64_t color = colorTarget(kiln);
+
+    uint64_t indirect = kiln.createBuffer(sizeof(DrawIndirectCommand));
+    const DrawIndirectCommand command{3, 1, 0, 0};
+    kiln.uploadBuffer(indirect, &command, sizeof(command));
+
+    const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    ProgramCall call{};
+    call.type = PROGRAM_TYPE_RASTER_DRAW;
+    call.program = draw;
+    call.bindings = {{.data = white, .size = sizeof(white)}};
+    call.colorTargets = {{color, true, {0.0f, 0.0f, 0.0f, 1.0f}}};
+    call.vertexBuffers = {triangle};
+    call.drawIndirectBuffer = indirect;
+    kiln.call(call);
+
+    std::vector<uint8_t> pixels = downloadPixels(kiln, color, SIZE, SIZE);
+    CHECK_EQ(pixelAt(pixels, SIZE, 32, 32), packRgba(255, 255, 255, 255));
+}
+
+// Same quad shape as raster_textured_indexed_depth's, drawn with vkCmdDrawIndexedIndirect.
+TEST(raster_indirect_draw_indexed)
+{
+    PixelKiln kiln;
+    RasterDrawProgram program = solidProgram({IMAGE_FORMAT_RGBA8_UNORM});
+    uint64_t draw = kiln.loadRasterDrawProgram(program);
+
+    const float vertices[] = {
+        -0.5f, -0.5f, 0.0f, 1.0f,
+        0.5f, -0.5f, 0.0f, 1.0f,
+        0.5f, 0.5f, 0.0f, 1.0f,
+        -0.5f, 0.5f, 0.0f, 1.0f,
+    };
+    const uint16_t indices[] = {0, 1, 2, 2, 3, 0};
+    uint64_t vertexBuffer = kiln.createBuffer(sizeof(vertices));
+    uint64_t indexBuffer = kiln.createBuffer(sizeof(indices));
+    kiln.uploadBuffer(vertexBuffer, vertices, sizeof(vertices));
+    kiln.uploadBuffer(indexBuffer, indices, sizeof(indices));
+    uint64_t color = colorTarget(kiln);
+
+    uint64_t indirect = kiln.createBuffer(sizeof(DrawIndexedIndirectCommand));
+    const DrawIndexedIndirectCommand command{6, 1, 0, 0, 0};
+    kiln.uploadBuffer(indirect, &command, sizeof(command));
+
+    const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    ProgramCall call{};
+    call.type = PROGRAM_TYPE_RASTER_DRAW;
+    call.program = draw;
+    call.bindings = {{.data = white, .size = sizeof(white)}};
+    call.colorTargets = {{color, true, {0.0f, 0.0f, 0.0f, 1.0f}}};
+    call.vertexBuffers = {vertexBuffer};
+    call.indexBuffer = indexBuffer;
+    call.indexType = INDEX_TYPE_UINT16;
+    call.drawIndirectBuffer = indirect;
+    kiln.call(call);
+
+    std::vector<uint8_t> pixels = downloadPixels(kiln, color, SIZE, SIZE);
+    CHECK_EQ(pixelAt(pixels, SIZE, 32, 32), packRgba(255, 255, 255, 255));
+    CHECK_EQ(pixelAt(pixels, SIZE, 2, 2), packRgba(0, 0, 0, 255));
 }
 
 // Per instance vertex buffer + 32 bit indices: four small squares, one per quadrant.
